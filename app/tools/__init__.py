@@ -1,2 +1,0 @@
-"""MCP Tools Adapter Package."""
-
