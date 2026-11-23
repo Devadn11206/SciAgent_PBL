@@ -24,12 +24,14 @@ from backend.app.core.problem_schema import ParameterSpec, ProblemIR
 # ---------------------------------------------------------------------------
 
 def estimate_dominant_frequency(problem: Optional[ProblemIR], n_samples: int = 128) -> float:
-    """Compute the dominant spatial frequency k_dom of the initial condition u(x, 0)
-
+    """Compute the dominant spatial frequency k_dom of the initial condition u(x, [y, z], 0)
     using np.fft.rfft on physical coordinates x in [x_min, x_max].
     """
     if problem is None or problem.problem_type == "ODE":
         return 1.0
+
+    if problem.spatial_dim in (2, 3):
+        return 2.0
 
     x_domain = problem.domain.x
     x_min = float(x_domain.min_val) if x_domain else -1.0
@@ -75,6 +77,9 @@ def estimate_dominant_frequency(problem: Optional[ProblemIR], n_samples: int = 1
             u_vals = (x_vals ** 2) * np.cos(np.pi * x_vals)
         elif "nlse" in prob_id or "schrodinger" in prob_id or "psi" in eq_latex:
             u_vals = 1.5 / np.cosh(1.5 * x_vals)
+        elif "kdv" in prob_id or "\\partial^{3}" in eq_latex or "u_xxx" in eq_latex:
+            # KdV single-soliton or smooth localized wave: use well-conditioned scale
+            return 1.5
         else:
             u_vals = -np.sin(np.pi * x_vals)
 

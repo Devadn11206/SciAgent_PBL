@@ -64,6 +64,13 @@ class ResearchSummary(BaseModel):
     physical_interpretation: List[str]
     ablation_takeaways: List[str]
     confidence_level: Literal["High", "Moderate", "Preliminary"]
+    # 6-Section Academic Prose Fields
+    abstract: Optional[str] = None
+    introduction: Optional[str] = None
+    mathematical_formulation: Optional[str] = None
+    methodology: Optional[str] = None
+    results_and_discussion: Optional[str] = None
+    conclusion: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

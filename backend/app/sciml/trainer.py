@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+import re
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import sympy as sp
 import torch
 import torch.nn as nn
 
@@ -76,7 +78,20 @@ class NonlinearPINNTrainer:
 
     def _create_model(self) -> NonlinearPINN:
         is_ode = (self.problem.problem_type == "ODE")
-        in_dim = 1 if is_ode else 2
+        s_dim = getattr(self.problem, "spatial_dim", 1)
+        if is_ode or s_dim == 0:
+            in_dim = 1
+        elif s_dim == 3:
+            in_dim = 4  # (t, x, y, z)
+        elif s_dim == 2:
+            in_dim = 3  # (t, x, y)
+        elif self.problem.domain.z is not None:
+            in_dim = 4
+        elif self.problem.domain.y is not None:
+            in_dim = 3
+        else:
+            in_dim = 2  # (t, x)
+
         # NLSE has 2 channels (Re and Im)
         out_dim = 2 if self.problem.id == "nlse" else 1
 
@@ -106,23 +121,31 @@ class NonlinearPINNTrainer:
         residual_fn = self.compiler.build_residual_fn(model, model.inverse_params)
 
         is_ode = (self.problem.problem_type == "ODE")
+        s_dim = self.problem.spatial_dim
 
         # 1. Collocation points in normalized domain [-1, 1]
         t_colloc = torch.empty((n_collocation, 1), device=self.device).uniform_(-1.0, 1.0).requires_grad_(True)
         if not is_ode:
             x_colloc = torch.empty((n_collocation, 1), device=self.device).uniform_(-1.0, 1.0).requires_grad_(True)
+            y_colloc = torch.empty((n_collocation, 1), device=self.device).uniform_(-1.0, 1.0).requires_grad_(True) if s_dim >= 2 else None
+            z_colloc = torch.empty((n_collocation, 1), device=self.device).uniform_(-1.0, 1.0).requires_grad_(True) if s_dim == 3 else None
         else:
-            x_colloc = None
+            x_colloc = y_colloc = z_colloc = None
 
         # 2. Initial Condition Points (t_norm = -1.0)
         t_ic = torch.full((n_ic, 1), -1.0, device=self.device).requires_grad_(True)
         if not is_ode:
             x_ic = torch.linspace(-1.0, 1.0, n_ic, device=self.device).unsqueeze(1)
-            # Physical x coordinate for evaluating initial condition function
+            y_ic = torch.linspace(-1.0, 1.0, n_ic, device=self.device).unsqueeze(1) if s_dim >= 2 else None
+            z_ic = torch.linspace(-1.0, 1.0, n_ic, device=self.device).unsqueeze(1) if s_dim == 3 else None
+
+            # Physical coordinates for evaluating initial condition function
             x_ic_phys = torch.tensor([self.normalizer.x_transform.to_physical(float(v)) for v in x_ic], device=self.device).unsqueeze(1)
-            u_ic_target = self._eval_ic_function(x_ic_phys)
+            y_ic_phys = torch.tensor([self.normalizer.y_transform.to_physical(float(v)) for v in y_ic], device=self.device).unsqueeze(1) if y_ic is not None and self.normalizer.y_transform else None
+            z_ic_phys = torch.tensor([self.normalizer.z_transform.to_physical(float(v)) for v in z_ic], device=self.device).unsqueeze(1) if z_ic is not None and self.normalizer.z_transform else None
+            u_ic_target = self._eval_ic_function(x_ic_phys, y_ic_phys, z_ic_phys)
         else:
-            x_ic = None
+            x_ic = y_ic = z_ic = None
             u_ic_target = torch.tensor([[0.5]], device=self.device)  # Duffing x(0) = 0.5
 
         # 3. Boundary Condition Points for PDEs (x_norm = -1.0 and +1.0)
@@ -130,8 +153,10 @@ class NonlinearPINNTrainer:
             t_bc = torch.empty((n_bc, 1), device=self.device).uniform_(-1.0, 1.0)
             x_bc_min = torch.full((n_bc, 1), -1.0, device=self.device)
             x_bc_max = torch.full((n_bc, 1), 1.0, device=self.device)
+            y_bc = torch.empty((n_bc, 1), device=self.device).uniform_(-1.0, 1.0) if s_dim >= 2 else None
+            z_bc = torch.empty((n_bc, 1), device=self.device).uniform_(-1.0, 1.0) if s_dim == 3 else None
         else:
-            t_bc = x_bc_min = x_bc_max = None
+            t_bc = x_bc_min = x_bc_max = y_bc = z_bc = None
 
         # 4. Optional Sensor Data (for inverse parameter identification)
         t_sensor = x_sensor = u_sensor = None
@@ -151,9 +176,14 @@ class NonlinearPINNTrainer:
         rar_added_points: List[Tuple[float, float]] = []
 
         # Loss function closure
-        def compute_losses() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        def compute_losses() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             # PDE Collocation Loss
-            res = residual_fn(t_colloc, x_colloc)
+            if s_dim == 3:
+                res = residual_fn(t_colloc, x_colloc, y_colloc, z_colloc)
+            elif s_dim == 2:
+                res = residual_fn(t_colloc, x_colloc, y_colloc)
+            else:
+                res = residual_fn(t_colloc, x_colloc)
 
             if self.use_causal_loss:
                 # Sort collocation points by time to compute cumulative weights
@@ -168,7 +198,12 @@ class NonlinearPINNTrainer:
 
             # IC Loss
             if not is_ode:
-                coords_ic = torch.cat([t_ic, x_ic], dim=-1)
+                if s_dim == 3:
+                    coords_ic = torch.cat([t_ic, x_ic, y_ic, z_ic], dim=-1)
+                elif s_dim == 2:
+                    coords_ic = torch.cat([t_ic, x_ic, y_ic], dim=-1)
+                else:
+                    coords_ic = torch.cat([t_ic, x_ic], dim=-1)
                 u_ic_pred = model(coords_ic)
                 if self.problem.id == "nlse":
                     # NLSE initial target has real u and imag v=0
@@ -184,22 +219,95 @@ class NonlinearPINNTrainer:
             # BC Loss
             bc_loss = torch.tensor(0.0, device=self.device)
             if not is_ode:
-                if self.problem.id in ("allen-cahn", "nlse"):
-                    # Periodic BC: u(-1, t) == u(+1, t)
-                    c_min = torch.cat([t_bc, x_bc_min], dim=-1)
-                    c_max = torch.cat([t_bc, x_bc_max], dim=-1)
-                    bc_loss = torch.mean((model(c_min) - model(c_max)) ** 2)
+                if s_dim >= 2:
+                    # Boundary loss for 2D/3D (outer box boundary is Dirichlet zero)
+                    if s_dim == 3:
+                        c_bc_min = torch.cat([t_bc, x_bc_min, y_bc, z_bc], dim=-1)
+                        c_bc_max = torch.cat([t_bc, x_bc_max, y_bc, z_bc], dim=-1)
+                    else:
+                        c_bc_min = torch.cat([t_bc, x_bc_min, y_bc], dim=-1)
+                        c_bc_max = torch.cat([t_bc, x_bc_max, y_bc], dim=-1)
+                    bc_loss = torch.mean(model(c_bc_min) ** 2) + torch.mean(model(c_bc_max) ** 2)
                 else:
-                    # Burgers: Dirichlet zero at x = +-1
-                    c_min = torch.cat([t_bc, x_bc_min], dim=-1)
-                    c_max = torch.cat([t_bc, x_bc_max], dim=-1)
-                    bc_loss = torch.mean(model(c_min) ** 2) + torch.mean(model(c_max) ** 2)
+                    # Dynamic boundary condition evaluation from ProblemIR (1D)
+                    has_periodic = False
+                    has_neumann = False
+                    dirichlet_targets: List[Tuple[torch.Tensor, float]] = []
+
+                    if self.problem.boundary_conditions:
+                        for bc in self.problem.boundary_conditions:
+                            kind = (bc.kind or "").lower()
+                            if kind == "periodic":
+                                has_periodic = True
+                            elif kind == "neumann":
+                                has_neumann = True
+                            elif kind == "dirichlet":
+                                # Parse value if present, default 0.0
+                                val = 0.0
+                                if "=" in (bc.expression or ""):
+                                    try:
+                                        val = float(bc.expression.split("=")[-1].strip())
+                                    except Exception:
+                                        val = 0.0
+                                coord = (bc.coordinate or "").lower()
+                                if coord == "x_min":
+                                    dirichlet_targets.append((x_bc_min, val))
+                                elif coord == "x_max":
+                                    dirichlet_targets.append((x_bc_max, val))
+                                else:
+                                    dirichlet_targets.append((x_bc_min, val))
+                                    dirichlet_targets.append((x_bc_max, val))
+                    elif self.problem.id in ("allen-cahn", "nlse"):
+                        has_periodic = True
+
+                    if has_periodic:
+                        # Periodic BC: u(x_min, t) == u(x_max, t)
+                        c_min = torch.cat([t_bc, x_bc_min], dim=-1)
+                        c_max = torch.cat([t_bc, x_bc_max], dim=-1)
+                        u_min = model(c_min)
+                        u_max = model(c_max)
+                        bc_loss = bc_loss + torch.mean((u_min - u_max) ** 2)
+
+                        # Also periodic derivative: u_x(x_min, t) == u_x(x_max, t)
+                        c_min_grad = c_min.clone().requires_grad_(True)
+                        c_max_grad = c_max.clone().requires_grad_(True)
+                        u_min_g = model(c_min_grad)
+                        u_max_g = model(c_max_grad)
+                        ux_min = compute_derivative(u_min_g, c_min_grad, order=1)[:, 1:2]
+                        ux_max = compute_derivative(u_max_g, c_max_grad, order=1)[:, 1:2]
+                        bc_loss = bc_loss + 0.1 * torch.mean((ux_min - ux_max) ** 2)
+
+                    if has_neumann and not has_periodic:
+                        # Neumann zero-flux: u_x(x_min, t) == 0 and u_x(x_max, t) == 0
+                        c_min_grad = torch.cat([t_bc, x_bc_min], dim=-1).requires_grad_(True)
+                        c_max_grad = torch.cat([t_bc, x_bc_max], dim=-1).requires_grad_(True)
+                        ux_min = compute_derivative(model(c_min_grad), c_min_grad, order=1)[:, 1:2]
+                        ux_max = compute_derivative(model(c_max_grad), c_max_grad, order=1)[:, 1:2]
+                        bc_loss = bc_loss + torch.mean(ux_min ** 2) + torch.mean(ux_max ** 2)
+
+                    if dirichlet_targets and not has_periodic:
+                        for x_target, target_val in dirichlet_targets:
+                            c_target = torch.cat([t_bc, x_target], dim=-1)
+                            bc_loss = bc_loss + torch.mean((model(c_target) - target_val) ** 2)
+                    elif not has_periodic and not has_neumann:
+                        # Standard Dirichlet zero fallback
+                        c_min = torch.cat([t_bc, x_bc_min], dim=-1)
+                        c_max = torch.cat([t_bc, x_bc_max], dim=-1)
+                        bc_loss = bc_loss + torch.mean(model(c_min) ** 2) + torch.mean(model(c_max) ** 2)
 
             # Data Loss (Inverse parameter fitting)
             data_loss = torch.tensor(0.0, device=self.device)
             if u_sensor is not None:
                 if not is_ode:
-                    coords_sensor = torch.cat([t_sensor, x_sensor], dim=-1)
+                    if s_dim == 3:
+                        y_sens = torch.zeros_like(x_sensor)
+                        z_sens = torch.zeros_like(x_sensor)
+                        coords_sensor = torch.cat([t_sensor, x_sensor, y_sens, z_sens], dim=-1)
+                    elif s_dim == 2:
+                        y_sens = torch.zeros_like(x_sensor)
+                        coords_sensor = torch.cat([t_sensor, x_sensor, y_sens], dim=-1)
+                    else:
+                        coords_sensor = torch.cat([t_sensor, x_sensor], dim=-1)
                     u_sens_pred = model(coords_sensor)
                     if self.problem.id == "nlse":
                         # Compare modulus |psi| with sensor intensity amplitude
@@ -252,15 +360,28 @@ class NonlinearPINNTrainer:
                 with torch.no_grad():
                     cand_t = torch.empty((self.rar_candidates, 1), device=self.device).uniform_(-1.0, 1.0)
                     cand_x = torch.empty((self.rar_candidates, 1), device=self.device).uniform_(-1.0, 1.0)
+                    cand_y = torch.empty((self.rar_candidates, 1), device=self.device).uniform_(-1.0, 1.0) if s_dim >= 2 else None
+                    cand_z = torch.empty((self.rar_candidates, 1), device=self.device).uniform_(-1.0, 1.0) if s_dim == 3 else None
                 cand_t.requires_grad_(True)
                 cand_x.requires_grad_(True)
+                if cand_y is not None:
+                    cand_y.requires_grad_(True)
+                if cand_z is not None:
+                    cand_z.requires_grad_(True)
 
-                res_cand = residual_fn(cand_t, cand_x)
+                if s_dim == 3:
+                    res_cand = residual_fn(cand_t, cand_x, cand_y, cand_z)
+                elif s_dim == 2:
+                    res_cand = residual_fn(cand_t, cand_x, cand_y)
+                else:
+                    res_cand = residual_fn(cand_t, cand_x)
                 abs_res = torch.abs(res_cand).squeeze()
                 top_vals, top_idx = torch.topk(abs_res, k=min(self.rar_top_k, len(abs_res)))
 
                 new_t = cand_t[top_idx].detach()
                 new_x = cand_x[top_idx].detach()
+                new_y = cand_y[top_idx].detach() if cand_y is not None else None
+                new_z = cand_z[top_idx].detach() if cand_z is not None else None
 
                 # Record physical coordinates for UI
                 for k in range(len(new_t)):
@@ -271,6 +392,10 @@ class NonlinearPINNTrainer:
                 # Append to active collocation set
                 t_colloc = torch.cat([t_colloc.detach(), new_t], dim=0).requires_grad_(True)
                 x_colloc = torch.cat([x_colloc.detach(), new_x], dim=0).requires_grad_(True)
+                if y_colloc is not None and new_y is not None:
+                    y_colloc = torch.cat([y_colloc.detach(), new_y], dim=0).requires_grad_(True)
+                if z_colloc is not None and new_z is not None:
+                    z_colloc = torch.cat([z_colloc.detach(), new_z], dim=0).requires_grad_(True)
 
             # Record loss telemetry
             if epoch % 20 == 0 or epoch == 1:
@@ -332,15 +457,22 @@ class NonlinearPINNTrainer:
 
         return model, loss_history, rar_added_points
 
-    def _eval_ic_function(self, x_phys: torch.Tensor) -> torch.Tensor:
+    def _eval_ic_function(
+        self,
+        x_phys: torch.Tensor,
+        y_phys: Optional[torch.Tensor] = None,
+        z_phys: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Evaluate analytical initial condition function based on problem preset or custom IC."""
-        # Check custom initial condition first
+        # 1. Evaluate from ProblemIR.initial_conditions
         if self.problem.initial_conditions:
             for ic in self.problem.initial_conditions:
                 expr_str = ic.expression or ""
                 if "=" in expr_str:
                     expr_str = expr_str.split("=")[-1].strip()
-                expr_clean = expr_str.replace("^", "**").replace("pi", "torch.pi")
+                expr_clean = expr_str.replace("^", "**")
+
+                # Safe eval supporting x, y, z
                 try:
                     safe_dict = {
                         "torch": torch,
@@ -349,27 +481,37 @@ class NonlinearPINNTrainer:
                         "exp": torch.exp,
                         "tanh": torch.tanh,
                         "cosh": torch.cosh,
+                        "sech": lambda v: 1.0 / torch.cosh(v),
                         "x": x_phys,
+                        "y": y_phys if y_phys is not None else torch.zeros_like(x_phys),
+                        "z": z_phys if z_phys is not None else torch.zeros_like(x_phys),
                         "pi": torch.pi,
                     }
-                    res = eval(expr_clean, {"__builtins__": {}}, safe_dict)
+                    res = eval(expr_clean.replace("pi", "torch.pi"), {"__builtins__": {}}, safe_dict)
                     if isinstance(res, torch.Tensor) and res.shape == x_phys.shape:
                         return res
+                    elif isinstance(res, torch.Tensor) and res.numel() == x_phys.numel():
+                        return res.reshape_as(x_phys)
                     elif isinstance(res, (int, float)):
                         return torch.full_like(x_phys, float(res))
                 except Exception:
                     pass
 
+        # 2. Canonical fallbacks only if no initial_conditions was defined
         prob_id = self.problem.id.lower()
         eq_latex = self.problem.equation_latex.lower()
-        if "burgers" in prob_id or "nu" in eq_latex:
-            # u(x, 0) = -sin(pi * x)
+        if "gray-scott" in prob_id or self.problem.spatial_dim == 2:
+            y_val = y_phys if y_phys is not None else torch.zeros_like(x_phys)
+            return torch.exp(-6.0 * (x_phys**2 + y_val**2)) - 0.5
+        elif "heat-3d" in prob_id or self.problem.spatial_dim == 3:
+            y_val = y_phys if y_phys is not None else torch.zeros_like(x_phys)
+            z_val = z_phys if z_phys is not None else torch.zeros_like(x_phys)
+            return torch.sin(torch.pi * x_phys) * torch.sin(torch.pi * y_val) * torch.sin(torch.pi * z_val)
+        elif "burgers" in prob_id or "nu" in eq_latex:
             return -torch.sin(torch.pi * x_phys)
         elif "allen" in prob_id or "cahn" in prob_id or "eps" in eq_latex:
-            # u(x, 0) = x^2 * cos(pi * x)
             return (x_phys ** 2) * torch.cos(torch.pi * x_phys)
         elif "nlse" in prob_id or "schrodinger" in prob_id or "psi" in eq_latex:
-            # psi(x, 0) = 1.5 / cosh(1.5 * x)
             return 1.5 / torch.cosh(1.5 * x_phys)
         else:
             return -torch.sin(torch.pi * x_phys)

@@ -60,6 +60,18 @@ export const PRESET_METAS: Record<string, ExperimentMeta> = {
     latex: '\\ddot{x} + \\delta\\,\\dot{x} + \\alpha\\,x + \\beta\\,x^{3} = \\gamma\\cos(\\omega t)',
     referenceSolver: 'Adaptive DOP853 Runge-Kutta',
   },
+  kdv: {
+    id: 'kdv',
+    name: 'KdV Soliton Equation',
+    title: 'KdV Soliton Wave',
+    subtitle: 'Dispersive nonlinear shallow water soliton propagation',
+    tint: 'from-emerald-50/70 to-teal-50/40',
+    accent: '#059669',
+    icon: 'waves',
+    mode: 'Forward',
+    latex: '\\frac{\\partial u}{\\partial t} + 6\\,u\\,\\frac{\\partial u}{\\partial x} + \\frac{\\partial^{3} u}{\\partial x^{3}} = 0',
+    referenceSolver: 'Method-of-Lines Radau',
+  },
 }
 
 export interface PresetParamCatalogItem {

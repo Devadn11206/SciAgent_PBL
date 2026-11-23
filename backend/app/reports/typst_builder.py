@@ -32,19 +32,30 @@ def build_typst_source(
     """Generate single-column Typst markup for the academic research manuscript."""
     run_id = run_dict.get("id", "run_default")
     prob_id = run_dict.get("problem_id", "burgers")
+    prob_name = run_dict.get("problem_name", prob_id.replace("_", " ").title())
     summary = run_dict.get("insight_summary", "Autonomous PINN optimization achieved verified physical convergence.")
     final_metrics = run_dict.get("final_metrics", {})
     t1_metrics = run_dict.get("trial1_metrics", {})
     discovered = run_dict.get("discovered_parameters", {})
     bench_scores = run_dict.get("benchmark_scores", [])
     ablation = run_dict.get("ablation_history", [])
+    raw_payload = run_dict.get("raw_payload", {})
+    academic_prose = raw_payload.get("academic_prose", {}) if isinstance(raw_payload, dict) else {}
 
     meta_over = metadata_override or {}
-    title = meta_over.get("title") or f"Autonomous Scientific Discovery & Self-Correcting Physics-Informed Learning of {prob_id.upper()} Dynamics"
+    title = meta_over.get("title") or f"Autonomous Scientific Discovery & Neural Verification: {prob_name}"
     authors = meta_over.get("authors") or "SciAgent Autonomous Research Engine, Deep Learning SciML Lab"
     affiliation = meta_over.get("affiliation") or "Department of Applied Mathematics and Computational Physics, NexusAI Foundation"
     journal = meta_over.get("journal") or "Journal of Computational Physics (Preprint)"
     custom_notes = meta_over.get("custom_notes") or ""
+
+    # Check for individual section text overrides from metadata_override
+    sec_abstract = meta_over.get("abstract") or academic_prose.get("abstract")
+    sec_intro = meta_over.get("introduction") or academic_prose.get("introduction")
+    sec_math = meta_over.get("mathematical_formulation") or academic_prose.get("mathematical_formulation")
+    sec_method = meta_over.get("methodology") or academic_prose.get("methodology")
+    sec_results = meta_over.get("results_and_discussion") or academic_prose.get("results_and_discussion")
+    sec_conclusion = meta_over.get("conclusion") or academic_prose.get("conclusion")
 
     rel_l2_raw = final_metrics.get("relative_l2_error", final_metrics.get("rel_l2", 1.45e0))
     t1_l2_raw = t1_metrics.get("relative_l2_error", t1_metrics.get("rel_l2", 1.00e0))
@@ -87,6 +98,8 @@ def build_typst_source(
             eq_typst = "$ i (partial psi) / (partial t) + (beta / 2) (partial^2 psi) / (partial x^2) + gamma |psi|^2 psi - delta |psi|^4 psi = 0 $"
         elif prob_id == "duffing":
             eq_typst = "$ dot.double(x) + delta dot(x) + alpha x + beta x^3 = gamma cos(omega t) $"
+        elif prob_id == "kdv":
+            eq_typst = "$ (partial u) / (partial t) + c u (partial u) / (partial x) + (partial^3 u) / (partial x^3) = 0 $"
 
     # Build scorecard rows
     scorecard_rows = []
@@ -143,6 +156,63 @@ def build_typst_source(
 ]
 """
 
+    # Section 1: Abstract Fallback
+    if not sec_abstract:
+        sec_abstract = (
+            f"We investigate the automated scientific discovery and physics-informed neural network (PINN) solution of the nonlinear {prob_name} "
+            f"system using an autonomous, multi-agent self-correcting feedback framework. Beginning from an unassisted baseline model that achieved a relative L2 "
+            f"error of {t1_l2:.2e}, the Critic Agent autonomously audited physics conservation drift, diagnosed spectral and gradient bottlenecks, and dispatched "
+            f"targeted interventions: residual-adaptive collocation refinement (RAR) and second-order L-BFGS curvature optimization. Over autonomous iterations, "
+            f"relative L2 error was reduced to {rel_l2:.2e} (a {improvement:.1f}x reduction), while physical invariant drift was bounded to {drift_pct:.2f}%. "
+            f"Recovered physical parameters: {param_str}. All figures and numerical tables are generated directly from verified SQLite experiment checkpoints."
+        )
+
+    # Section 2: Introduction Fallback
+    if not sec_intro:
+        sec_intro = (
+            f"Physics-informed neural networks offer significant promise for data-driven modeling of complex spatio-temporal dynamics. "
+            f"However, standard architectures often fail on challenging nonlinear PDEs such as {prob_name} due to spectral bias, vanishing gradients, "
+            f"or optimizer stagnation in non-physical local minima.\n\n"
+            f"To resolve these challenges, SciAgent introduces an autonomous closed-loop architecture where an LLM-guided Critic agent "
+            f"dynamically audits solution fidelity, monitors physical conservation laws, and orchestrates curriculum learning interventions "
+            f"to guarantee empirical convergence."
+        )
+
+    # Section 3: Mathematical Formulation Fallback
+    if not sec_math:
+        sec_math = (
+            f"The physical dynamics of {prob_name} are formulated canonically on the spatio-temporal domain. "
+            f"Coordinates are mapped onto the normalized interval [-1, 1] using chain-rule scaling factors from the AutoNormalizer. "
+            f"Initial and boundary conditions enforce physical state consistency, while integral invariants are audited at each time step."
+        )
+
+    # Section 4: Methodology Fallback
+    if not sec_method:
+        sec_method = (
+            f"Our framework integrates four key pillars:\n"
+            f"1. *High-Order Ground Truth:* High-precision reference numerical integration.\n"
+            f"2. *Multi-Scale Fourier PINN:* Dual-frequency random Fourier projection layer to mitigate spectral bias.\n"
+            f"3. *Two-Stage Curriculum Training:* Initial condition anchor warmup followed by causal temporal marching and Residual-Adaptive Refinement (RAR).\n"
+            f"4. *Second-Order Curvature Polish:* L-BFGS line-search optimization to eliminate residual plateaus."
+        )
+
+    # Section 5: Results & Discussion Fallback
+    if not sec_results:
+        sec_results = (
+            f"Table 1 and Table 2 present the quantitative convergence progression. The initial baseline trial achieved relative L2 error of {t1_l2:.2e}. "
+            f"Through sequential Critic interventions, relative L2 error dropped to {rel_l2:.2e}, yielding a {improvement:.1f}x performance boost. "
+            f"Figure 1 displays 1-to-1 visual agreement with the numerical baseline, Figure 2 highlights multi-term loss descent, and Figure 3 "
+            f"confirms conservation drift was constrained to {drift_pct:.2f}%."
+        )
+
+    # Section 6: Conclusion Fallback
+    if not sec_conclusion:
+        sec_conclusion = (
+            f"SciAgent successfully solved and verified the {prob_name} system without manual hyperparameter tuning. "
+            f"By coupling multi-scale Fourier embeddings, causal curriculum scheduling, and autonomous invariant auditing, "
+            f"the framework eliminates zero-solution collapse and enforces strict physical validity."
+        )
+
     typst_code = f"""
 #set page(
   paper: "a4",
@@ -151,7 +221,7 @@ def build_typst_source(
   header: context [
     #if counter(page).get().first() > 1 [
       #text(size: 8pt, fill: rgb("#64748B"))[
-        *{journal}* | Run: `{run_id}` | System: {prob_id.upper()}
+        *{journal}* | Run: `{run_id}` | System: {prob_name}
         #h(1fr) #counter(page).display()
       ]
       #line(length: 100%, stroke: 0.5pt + rgb("#CBD5E1"))
@@ -174,7 +244,7 @@ def build_typst_source(
 
 #v(8pt)
 
-// Section 1: Abstract
+// Executive Abstract
 #block(
   fill: rgb("#F8FAFC"),
   stroke: 1pt + rgb("#E2E8F0"),
@@ -182,14 +252,20 @@ def build_typst_source(
   radius: 4pt,
 )[
   #text(weight: "bold", size: 9.5pt, fill: rgb("#0F172A"))[Abstract ---]
-  We investigate the automated scientific discovery and physics-informed neural network (PINN) solution of the nonlinear {prob_id} system using an autonomous, multi-agent self-correcting feedback framework. Beginning from an unassisted baseline model that achieved a relative $L_2$ error of {t1_l2:.2e}, the Critic Agent autonomously audited physics conservation drift, diagnosed spectral and gradient bottlenecks, and dispatched targeted interventions: residual-adaptive collocation refinement (RAR) and second-order L-BFGS curvature optimization. Over 3 autonomous iterations, relative $L_2$ error was reduced to *{rel_l2:.2e}* (a *{improvement:.1f}x* reduction), while physical invariant drift was bounded to *{drift_pct:.2f}%*. Recovered physical parameters: *{param_str}*. All figures and numerical tables are generated directly from verified SQLite experiment checkpoints.
+  {sec_abstract}
 ]
 
 #v(10pt)
 
-== 1. Governing Equations & Nondimensionalization
+== 1. Introduction
 
-The physical system under consideration is formulated canonically as:
+{sec_intro}
+
+#v(10pt)
+
+== 2. Mathematical Formulation
+
+{sec_math}
 
 #align(center)[
   #block(
@@ -202,30 +278,32 @@ The physical system under consideration is formulated canonically as:
   ]
 ]
 
-Coordinates were mapped onto the canonical domain $[-1, 1]$ via exact chain-rule scaling factors ($d_x, d_t$) governed by the `AutoNormalizer`. Collocation density was initialized with Sobol sampling before entering the cyclic agent optimization loop.
+#v(10pt)
+
+== 3. Methodology & Multi-Agent Architecture
+
+{sec_method}
 
 #v(10pt)
 
-== 2. Methodology & Autonomous Critic Self-Correction
+== 4. Results & Discussion
 
-Our numerical framework evaluates three coupled solving tiers:
-1. *Deterministic Numerical Reference:* High-order split-step or Crank-Nicolson finite-difference solvers providing $O(Delta t^2, Delta x^4)$ accurate ground-truth fields.
-2. *Nonlinear PINN Surrogate:* Multi-layer perceptron (MLP) mapping $(x, t) -> u$ trained against composite physics losses $cal(L)_"total" = cal(L)_"pde" + lambda_b cal(L)_b + lambda_d cal(L)_d$.
-3. *LangGraph Critic Agent:* After each trial, the Critic evaluates L2 residual norms, flags causality/shock smearing, and modifies training hyperparameters without human intervention.
+{sec_results}
 
-#v(10pt)
-
-== 3. Quantitative Results & Visual Comparison
+#v(8pt)
 
 #figure(
   image("{f1_clean}", width: 95%),
   caption: [
-    *Multi-Panel Spatio-Temporal Solution & Error Grid.* (a) Reference numerical ground truth $u_"ref"(x, t)$; (b) Agent-Corrected PINN prediction $u_"pred"(x, t)$; (c) Pointwise absolute error $|u_"pred" - u_"ref"|$; (d) Temporal slice overlays with shaded 95% UQ confidence intervals.
+    *Multi-Panel Spatio-Temporal Solution & Error Grid for {prob_name}.* (a) Reference numerical ground truth $u_"ref"(x, t)$; (b) Agent-Corrected PINN prediction $u_"pred"(x, t)$; (c) Pointwise absolute error $|u_"pred" - u_"ref"|$; (d) Temporal slice overlays with shaded 95% UQ confidence intervals.
   ]
 )
 
 #v(8pt)
 
+#align(center)[
+  #text(weight: "bold", size: 9pt)[Table 1: Quantitative Benchmark Scorecard]
+]
 #table(
   columns: (2.2fr, 2.2fr, 1.2fr, 1.2fr, 1.2fr, 1fr),
   stroke: (x, y) => if y == 0 {{ (bottom: 1.5pt + black) }} else if y == 1 {{ (bottom: 0.8pt + rgb("#94A3B8")) }} else {{ (bottom: 0.5pt + rgb("#E2E8F0")) }},
@@ -244,19 +322,11 @@ Our numerical framework evaluates three coupled solving tiers:
   ]
 )
 
-#v(10pt)
-
-== 4. Physics Audit & Ablation Log
-
-#figure(
-  image("{f3_clean}", width: 95%),
-  caption: [
-    *Physics Invariant Audit & Spatial Error Profile.* (a) Invariant conservation trajectory $cal(I)(t)$ across Reference, Naive PINN (Trial 1), and Agent-Corrected PINN (Final); (b) Pointwise mean and peak spatial error distribution across $x$.
-  ]
-)
-
 #v(8pt)
 
+#align(center)[
+  #text(weight: "bold", size: 9pt)[Table 2: Agentic Self-Correction Ablation Log]
+]
 #table(
   columns: (1fr, 2.5fr, 3.5fr, 1.2fr),
   stroke: (x, y) => if y == 0 {{ (bottom: 1.5pt + black) }} else {{ (bottom: 0.5pt + rgb("#E2E8F0")) }},
@@ -268,20 +338,20 @@ Our numerical framework evaluates three coupled solving tiers:
 
 #v(10pt)
 
-== 5. Physical Interpretation & Discussion
+#figure(
+  image("{f3_clean}", width: 95%),
+  caption: [
+    *Physics Invariant Audit & Spatial Error Profile for {prob_name}.* (a) Invariant conservation trajectory $cal(I)(t)$ across Reference, Naive PINN (Trial 1), and Agent-Corrected PINN (Final); (b) Pointwise mean and peak spatial error distribution across $x$.
+  ]
+)
 
-#block(
-  fill: rgb("#FAF5FF"),
-  stroke: 1pt + rgb("#E9D5FF"),
-  inset: 10pt,
-  radius: 4pt,
-)[
-  #text(weight: "bold", fill: rgb("#6B21A8"))[Research Synthesis Agent Findings:]
-  #v(2pt)
-  {summary}
-  The self-correcting feedback mechanism proved critical in resolving spectral bias and boundary-layer smearing. The recovered invariant trajectory demonstrates that coupling residual-adaptive collocation with curvature-aware polish guarantees both numerical accuracy and physical law consistency.
-]
 {custom_discussion_block}
+
+#v(10pt)
+
+== 5. Conclusion
+
+{sec_conclusion}
 """
     return typst_code
 

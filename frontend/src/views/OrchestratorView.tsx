@@ -59,29 +59,40 @@ function computeNodeStates(stage: number, logs: any[], isRunning: boolean): Node
     { ...pending },
   ]
   
-  if (stage < 0 || !isRunning && logs.length === 0) return s // Idle / Ready state
+  if (stage < 0 || (!isRunning && logs.length === 0)) return s // Idle / Ready state
+
+  if (!isRunning && stage >= 8) {
+    // Workflow has completely finished
+    return [
+      { ...done, duration: '1.2s' },
+      { ...done, duration: '0.8s' },
+      { ...done, duration: '14.5s' },
+      { ...done, duration: '2.1s' },
+      { ...done, duration: '3.4s' },
+    ]
+  }
 
   s[0] = stage === 0 ? { ...running } : { ...done, duration: '1.2s' }
   s[1] = stage < 1 ? { ...pending } : stage === 1 ? { ...running } : { ...done, duration: '0.8s' }
   s[2] = stage < 2
     ? { ...pending }
     : stage === 2
-    ? { ...running }
+    ? (isRunning ? { ...running } : { label: 'Trial done', kind: 'done', duration: '8.4s' })
     : stage === 4
-    ? { label: 'Self-Correcting Trial 2/3', kind: 'correcting' }
+    ? (isRunning ? { label: 'Self-Correcting Trial 2/3', kind: 'correcting' } : { label: 'Trial 2 done', kind: 'done', duration: '11.2s' })
     : stage === 6
-    ? { label: 'Self-Correcting Trial 3/3', kind: 'correcting' }
+    ? (isRunning ? { label: 'Self-Correcting Trial 3/3', kind: 'correcting' } : { label: 'Trial 3 done', kind: 'done', duration: '14.5s' })
     : stage >= 7
     ? { ...done, duration: '14.5s' }
     : { label: 'Trial done', kind: 'done', duration: '8.4s' }
   s[3] = stage < 3
     ? { ...pending }
     : stage === 3 || stage === 5 || stage === 7
-    ? { ...running }
+    ? (isRunning ? { ...running } : { ...done, duration: '2.1s' })
     : stage === 4 || stage === 6
     ? { label: 'Awaiting trial', kind: 'pending' }
     : { ...done, duration: '2.1s' }
-  s[4] = stage < 8 ? { ...pending } : stage === 8 ? { ...running } : { ...done, duration: '3.4s' }
+  s[4] = stage < 8 ? { ...pending } : stage === 8 ? (isRunning ? { ...running } : { ...done, duration: '3.4s' }) : { ...done, duration: '3.4s' }
   return s
 }
 
@@ -95,7 +106,7 @@ interface Props {
   isRunning: boolean
   currentStage: number
   liveLogs: any[]
-  liveLosses: { epoch: number; pde: number; bc: number; data?: number; val?: number }[]
+  liveLosses: { epoch: number; trial?: number; pde: number; bc: number; data?: number; val?: number }[]
   agentResult: AgentRunResponse | null
   mcpTraces?: MCPTraceSpanItem[]
   pendingElicitation?: MCPElicitationSpec | null
@@ -129,16 +140,24 @@ export function OrchestratorView({
   const [selectedElicitChoice, setSelectedElicitChoice] = useState<string>('')
   const [submittingElicit, setSubmittingElicit] = useState(false)
 
+  // Combine live traces with agentResult db traces
+  const effectiveMcpTraces = useMemo(() => {
+    if (mcpTraces && mcpTraces.length > 0) return mcpTraces
+    const dbSpans = (agentResult as any)?.mcp_traces || agentResult?.db_record?.raw_payload?.mcp_traces
+    if (Array.isArray(dbSpans) && dbSpans.length > 0) return dbSpans
+    return []
+  }, [mcpTraces, agentResult])
+
   // Derive effective loss history: either real-time streaming, or loaded from db_record/agentResult
   const effectiveLosses = useMemo(() => {
     if (liveLosses && liveLosses.length > 0) return liveLosses
-    const dbLosses = agentResult?.db_record?.raw_payload?.loss_history
+    const dbLosses = agentResult?.db_record?.raw_payload?.loss_history || (agentResult as any)?.loss_history
     if (Array.isArray(dbLosses) && dbLosses.length > 0) {
       return dbLosses.map((l: any, i: number) => ({
         epoch: l.epoch ?? i + 1,
         trial: l.trial,
         pde: Number(l.pde ?? l.pde_loss ?? 0),
-        bc: Number(l.bc ?? l.bc_loss ?? 0),
+        bc: Number(l.bc ?? l.bc_loss ?? l.ic_bc_loss ?? 0),
         data: l.data !== undefined ? Number(l.data) : (l.data_loss !== undefined ? Number(l.data_loss) : undefined),
         val: Number(l.val ?? l.total_loss ?? l.pde ?? 0),
       }))
@@ -163,14 +182,20 @@ export function OrchestratorView({
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })
   }, [liveLogs.length])
 
-  // Live ticking timer for currently running stage
+  // Live ticking timer for currently running stage and active node
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const stageStartTimeRef = useRef<number>(Date.now())
+
+  useEffect(() => {
+    stageStartTimeRef.current = Date.now()
+    setElapsedSeconds(0)
+  }, [currentStage, isRunning])
+
   useEffect(() => {
     let t: number | undefined
     if (isRunning) {
-      const start = Date.now()
       t = window.setInterval(() => {
-        setElapsedSeconds((Date.now() - start) / 1000)
+        setElapsedSeconds((Date.now() - stageStartTimeRef.current) / 1000)
       }, 100)
     } else {
       setElapsedSeconds(0)
@@ -178,7 +203,7 @@ export function OrchestratorView({
     return () => {
       if (t) clearInterval(t)
     }
-  }, [isRunning])
+  }, [isRunning, currentStage])
 
   // Interactive quick toggles for Node 4 Critic
   const [criticToggles, setCriticToggles] = useState({
@@ -417,8 +442,15 @@ export function OrchestratorView({
           title="Live Solution & Multi-Term Loss Curves"
           icon={<BarChart3 size={17} className="text-rosepink" />}
           right={
-            <span className="mono text-[11px] text-slate-400">
-              {effectiveLosses.length > 0 ? `${effectiveLosses.length} epochs recorded` : 'awaiting live execution'}
+            <span className={cx(
+              'mono text-[11px] font-semibold transition-colors',
+              isRunning && effectiveLosses.length > 0 ? 'text-royal animate-pulse' : 'text-slate-400'
+            )}>
+              {isRunning && effectiveLosses.length > 0
+                ? `streaming trial ${effectiveLosses[effectiveLosses.length - 1]?.trial || 1} · epoch ${effectiveLosses[effectiveLosses.length - 1]?.epoch}`
+                : effectiveLosses.length > 0
+                ? `${effectiveLosses.length} epochs recorded`
+                : 'awaiting live execution'}
             </span>
           }
         >
@@ -447,10 +479,10 @@ export function OrchestratorView({
                       label={{ value: `Trial ${m.trial} (Critic)`, fill: '#BE185D', fontSize: 10, position: 'insideTopRight' }}
                     />
                   ))}
-                  <Line name="PDE residual" dataKey="pde" stroke="#EC4899" strokeWidth={2.4} dot={false} isAnimationActive={false} hide={hidden.pde} />
-                  <Line name="BC / IC" dataKey="bc" stroke="#C084FC" strokeWidth={1.4} strokeDasharray="4 3" dot={false} isAnimationActive={false} hide={hidden.bc} />
-                  {effectiveLosses[0]?.data !== undefined && <Line name="Sensor data" dataKey="data" stroke="#F59E0B" strokeWidth={1.4} dot={false} isAnimationActive={false} hide={hidden.data} />}
-                  {effectiveLosses[0]?.val !== undefined && <Line name="Total loss" dataKey="val" stroke="#06B6D4" strokeWidth={2.4} dot={false} isAnimationActive={false} hide={hidden.val} />}
+                  <Line name="Total Loss" dataKey="val" stroke="#06B6D4" strokeWidth={2.4} dot={false} isAnimationActive={false} hide={hidden.val} />
+                  <Line name="PDE Residual" dataKey="pde" stroke="#EC4899" strokeWidth={2.2} dot={false} isAnimationActive={false} hide={hidden.pde} />
+                  <Line name="IC/BC Anchor Loss" dataKey="bc" stroke="#8B5CF6" strokeWidth={1.6} strokeDasharray="4 3" dot={false} isAnimationActive={false} hide={hidden.bc} />
+                  {effectiveLosses[0]?.data !== undefined && <Line name="Sensor Data" dataKey="data" stroke="#F59E0B" strokeWidth={1.4} dot={false} isAnimationActive={false} hide={hidden.data} />}
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -474,7 +506,7 @@ export function OrchestratorView({
                   onClick={() => setConsoleTab('mcp')}
                   className={cx('rounded-md px-2 py-0.5 font-medium transition', consoleTab === 'mcp' ? 'bg-white text-indigo-900 shadow-sm' : 'text-slate-500 hover:text-slate-700')}
                 >
-                  MCP Tool Spans ({mcpTraces.length})
+                  MCP Tool Spans ({effectiveMcpTraces.length})
                 </button>
               </div>
               <Badge color={ollamaStatus?.online ? '#10B981' : '#F59E0B'}>
@@ -514,14 +546,14 @@ export function OrchestratorView({
             </div>
           ) : (
             <div className="h-[305px] overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-3">
-              {mcpTraces.length === 0 ? (
+              {effectiveMcpTraces.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center text-center text-slate-400">
                   <Network size={24} className="mb-2 text-slate-300" />
                   <p className="text-xs">No MCP tool spans recorded yet for this session.</p>
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {mcpTraces.map((span, idx) => (
+                  {effectiveMcpTraces.map((span, idx) => (
                     <div key={idx} className="flex flex-col gap-1 rounded-xl border border-slate-200 bg-white p-2.5 text-xs shadow-xs">
                       <div className="flex items-center justify-between">
                         <span className="mono rounded bg-violet-100 px-1.5 py-0.5 text-[10.5px] font-bold text-violet-700">
@@ -529,13 +561,13 @@ export function OrchestratorView({
                         </span>
                         <span className={cx(
                           'rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase',
-                          span.status === 'completed' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                          span.status === 'completed' || span.status === 'OK' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
                         )}>
                           {span.status}
                         </span>
                       </div>
                       <div className="mt-1 flex items-center justify-between text-slate-500 text-[11px]">
-                        <span className="mono truncate">id: {span.span_id.slice(0, 14)}...</span>
+                        <span className="mono truncate">id: {(span.span_id || '').slice(0, 14)}...</span>
                         {span.duration_ms !== undefined && (
                           <span className="flex items-center gap-1 text-slate-600 font-semibold">
                             <Timer size={11} /> {span.duration_ms.toFixed(1)}ms

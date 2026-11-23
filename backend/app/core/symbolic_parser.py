@@ -88,6 +88,8 @@ class ClassificationResult:
     primary_regime: RegimeType
     nonlinear_terms: List[NonlinearTermInfo]
     diagnostics: List[str]
+    suggested_invariant: Literal["mass", "l2_energy", "none"] = "none"
+    stability_advisory: Optional[str] = None
 
 
 @dataclass
@@ -136,6 +138,26 @@ def normalize_equation_str(eq_str: str) -> str:
     s = s.replace(r"\omega", "omega").replace("ω", "omega")
     s = s.replace(r"\psi", "psi").replace("ψ", "psi")
     s = s.replace(r"\pi", "pi").replace("π", "pi")
+    s = s.replace(r"\mu", "mu").replace("μ", "mu")
+    s = s.replace(r"\lambda", "lambda_").replace("λ", "lambda_")
+    s = s.replace(r"\sigma", "sigma").replace("σ", "sigma")
+    s = s.replace(r"\rho", "rho").replace("ρ", "rho")
+    s = s.replace(r"\theta", "theta").replace("θ", "theta")
+    s = s.replace(r"\phi", "phi").replace("ϕ", "phi").replace("φ", "phi")
+    s = s.replace(r"\kappa", "kappa").replace("κ", "kappa")
+
+    # Handle Laplacian and Nabla shorthands:
+    # 3D: \nabla^2 u or \Delta u when z is present -> u_xx + u_yy + u_zz
+    # 2D: \nabla^2 u or \Delta u -> u_xx + u_yy
+    if r"\Delta" in s or r"\nabla^2" in s or r"\nabla^{2}" in s:
+        is_3d = ("z" in s)
+        laplacian_replacement = (
+            r"(Derivative(\1, x, x) + Derivative(\1, y, y) + Derivative(\1, z, z))"
+            if is_3d else
+            r"(Derivative(\1, x, x) + Derivative(\1, y, y))"
+        )
+        s = re.sub(r"\\Delta\s*([a-zA-Z]+)", laplacian_replacement, s)
+        s = re.sub(r"\\nabla\^\{?2\}?\s*([a-zA-Z]+)", laplacian_replacement, s)
 
     # Handle derivatives written in LaTeX with or without braces in powers:
     # \frac{\partial^{2} u}{\partial x^{2}} or \frac{\partial^2 u}{\partial x^2}
@@ -412,7 +434,7 @@ class SymbolicClassifier:
 
         for d in derivatives:
             wrt = [str(a[0]) if isinstance(a, tuple) else str(a) for a in d.args[1:]]
-            if wrt.count("x") == 2:
+            if wrt.count("x") == 2 or wrt.count("y") == 2 or wrt.count("z") == 2:
                 has_diffusion = True
 
         if has_imaginary_time:
@@ -427,6 +449,52 @@ class SymbolicClassifier:
 
         primary_regime = regimes[0]
 
+        # -------------------------------------------------------------------
+        # Fast Symbolic Conservation Law Discovery & Peclet/Stiffness Advisory
+        # -------------------------------------------------------------------
+        suggested_invariant: Literal["mass", "l2_energy", "none"] = "none"
+        stability_advisory: Optional[str] = None
+        raw_eq_lower = str(residual_expr).lower()
+
+        # Check for L2 energy / norm conservation:
+        # e.g., complex dispersive Schrodinger (NLSE), or Hamiltonian conservative oscillators
+        if has_imaginary_time or "psi" in dep_names or "nlse" in raw_eq_lower or "schrodinger" in raw_eq_lower:
+            suggested_invariant = "l2_energy"
+        elif "kdv" in raw_eq_lower or (spatial_order >= 3 and not has_diffusion):
+            # Pure dispersion KdV: preserves mass and invariants
+            suggested_invariant = "mass"
+        elif spatial_order == 0:
+            # Conservative vs damped ODE: if no velocity damping (no first derivative term in x), preserves energy
+            has_first_deriv = any(
+                sum(1 for a in d.args[1:] if str(a) == "t" or (isinstance(a, tuple) and str(a[0]) == "t")) == 1
+                for d in derivatives
+            )
+            # If Duffing without delta or delta=0, energy is conserved
+            if not has_first_deriv or "gamma" in raw_eq_lower and "delta" not in raw_eq_lower:
+                suggested_invariant = "l2_energy"
+            else:
+                suggested_invariant = "none"
+        elif not has_diffusion and not any("1 - u" in t_str or "u**3" in t_str for t_str in [str(t) for t in terms]):
+            # Pure advection conservation
+            suggested_invariant = "mass"
+        else:
+            suggested_invariant = "none"
+
+        # Stability / Peclet advisory check:
+        # Detect small diffusion parameters (<0.015) or high-order dispersion (3rd-order spatial)
+        has_small_diffusion = any(p in raw_eq_lower and any(small in raw_eq_lower for small in ("0.01", "0.00", "0.012", "0.015", "1e-2")) for p in ("nu", "eps", "epsilon"))
+        has_3rd_dispersion = any(
+            sum(1 for a in d.args[1:] if str(a) in ("x", "y", "z") or (isinstance(a, tuple) and str(a[0]) in ("x", "y", "z"))) >= 3
+            for d in derivatives
+        )
+
+        if has_small_diffusion:
+            stability_advisory = "High Peclet regime — RAR shock-clustering & causal weighting auto-armed"
+        elif has_3rd_dispersion:
+            stability_advisory = "Sharp dispersive regime — Low-variance Fourier features & periodic flux auto-armed"
+        elif "stiff" in regimes:
+            stability_advisory = "Stiff polynomial reaction — Adaptive temporal curriculum auto-armed"
+
         diagnostics.append(
             f"Classification: {problem_type} with spatial order {spatial_order}, time order {time_order}."
         )
@@ -434,6 +502,7 @@ class SymbolicClassifier:
             diagnostics.append(f"Detected {len(nonlinear_terms)} nonlinear term(s). Regime: {primary_regime}.")
         else:
             diagnostics.append("Linear differential operator.")
+        diagnostics.append(f"Physical Invariant: {suggested_invariant}. Advisory: {stability_advisory or 'Nominal smooth dynamics'}.")
 
         return ClassificationResult(
             problem_type=problem_type,
@@ -444,6 +513,8 @@ class SymbolicClassifier:
             primary_regime=primary_regime,
             nonlinear_terms=nonlinear_terms,
             diagnostics=diagnostics,
+            suggested_invariant=suggested_invariant,
+            stability_advisory=stability_advisory,
         )
 
 

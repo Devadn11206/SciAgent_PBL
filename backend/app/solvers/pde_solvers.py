@@ -351,3 +351,90 @@ def solve_cubic_quintic_nlse_ssfm(
             "delta": delta,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. Korteweg-de Vries (KdV) Soliton Solver (Pseudospectral Split-Step)
+# ---------------------------------------------------------------------------
+
+def solve_kdv_pseudospectral(
+    x_span: Tuple[float, float] = (-10.0, 10.0),
+    t_span: Tuple[float, float] = (0.0, 1.0),
+    nx: int = 128,
+    nt: int = 100,
+    c: float = 6.0,
+    u0: Optional[np.ndarray] = None,
+) -> PDESolution:
+    """Solve Korteweg-de Vries (KdV) equation with periodic boundary conditions:
+        u_t + c * u * u_x + u_xxx = 0
+        on x in [x_min, x_max], t in [t_min, t_max]
+
+    Uses Strang Split-Step Fourier Method:
+    - Linear dispersive step: u_t + u_xxx = 0 (exact Fourier phase propagator: exp(i * k^3 * dt))
+    - Nonlinear advection step: u_t + c * u * u_x = 0 (4th-order Runge-Kutta in physical space)
+    """
+    from scipy.fft import fft, ifft, fftfreq
+
+    start_time = time.perf_counter()
+    x = np.linspace(x_span[0], x_span[1], nx, endpoint=False)
+    t = np.linspace(t_span[0], t_span[1], nt)
+    dt = t[1] - t[0]
+    L = x_span[1] - x_span[0]
+    k = 2.0 * np.pi * fftfreq(nx, d=L / nx)
+
+    if u0 is not None and len(u0) == nx:
+        curr = u0.astype(np.float64).copy()
+    else:
+        # Default KdV 1-soliton initial condition: 0.5 * sech(0.5 * x)^2
+        curr = 0.5 * (1.0 / np.cosh(0.5 * x)) ** 2
+
+    # High-accuracy sub-stepping for stability
+    n_sub = 20
+    dt_sub = dt / n_sub
+    prop_half = np.exp(0.5j * (k ** 3) * dt_sub)
+
+    u_grid = np.zeros((nt, nx), dtype=np.float64)
+    u_grid[0] = curr
+
+    for n in range(1, nt):
+        for _ in range(n_sub):
+            # Half-step linear dispersion
+            u_hat = fft(curr) * prop_half
+            curr = np.real(ifft(u_hat))
+
+            # Full-step nonlinear advection RK4: u_t = -c * u * u_x
+            def nl_rhs(v: np.ndarray) -> np.ndarray:
+                v_hat = fft(v)
+                vx = np.real(ifft(1j * k * v_hat))
+                return -c * v * vx
+
+            k1 = nl_rhs(curr)
+            k2 = nl_rhs(curr + 0.5 * dt_sub * k1)
+            k3 = nl_rhs(curr + 0.5 * dt_sub * k2)
+            k4 = nl_rhs(curr + dt_sub * k3)
+            curr = curr + (dt_sub / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+            # Half-step linear dispersion
+            u_hat = fft(curr) * prop_half
+            curr = np.real(ifft(u_hat))
+
+        u_grid[n] = curr
+
+    elapsed = time.perf_counter() - start_time
+    success = not np.isnan(u_grid).any()
+
+    return PDESolution(
+        method="Pseudospectral Split-Step (SSFM-RK4)",
+        x=x,
+        t=t,
+        u=u_grid,
+        solve_time_sec=elapsed,
+        success=success,
+        status_message="Solved KdV Pseudospectral" if success else "KdV solver encountered NaNs",
+        metadata={
+            "nx": nx,
+            "nt": nt,
+            "c": c,
+            "bc": "periodic",
+        },
+    )

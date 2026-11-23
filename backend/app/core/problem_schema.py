@@ -43,6 +43,8 @@ class DomainSpec(BaseModel):
     """Space and/or time domain bounds."""
     t: Domain1D = Field(..., description="Time interval [t_min, t_max]")
     x: Optional[Domain1D] = Field(None, description="Spatial interval [x_min, x_max] for PDEs")
+    y: Optional[Domain1D] = Field(None, description="Spatial interval [y_min, y_max] for 2D/3D PDEs")
+    z: Optional[Domain1D] = Field(None, description="Spatial interval [z_min, z_max] for 3D PDEs")
 
     @property
     def is_spatiotemporal(self) -> bool:
@@ -187,20 +189,26 @@ class DomainTransform(BaseModel):
 
 
 class AutoNormalizer(BaseModel):
-    """Domain normalizer mapping [x_min, x_max] and [t_min, t_max] to [-1, 1].
+    """Domain normalizer mapping [x_min, x_max], [y_min, y_max], [z_min, z_max] and [t_min, t_max] to [-1, 1].
 
     Provides exact chain rule derivative scaling factors:
       dx_scale (k-th order: (2 / (x_max - x_min))^k)
+      dy_scale (k-th order: (2 / (y_max - y_min))^k)
+      dz_scale (k-th order: (2 / (z_max - z_min))^k)
       dt_scale (k-th order: (2 / (t_max - t_min))^k)
     """
     t_transform: DomainTransform
     x_transform: Optional[DomainTransform] = None
+    y_transform: Optional[DomainTransform] = None
+    z_transform: Optional[DomainTransform] = None
 
     @classmethod
     def from_domain_spec(cls, domain: DomainSpec) -> AutoNormalizer:
         t_tx = DomainTransform.from_domain("t", domain.t)
         x_tx = DomainTransform.from_domain("x", domain.x) if domain.x is not None else None
-        return cls(t_transform=t_tx, x_transform=x_tx)
+        y_tx = DomainTransform.from_domain("y", domain.y) if domain.y is not None else None
+        z_tx = DomainTransform.from_domain("z", domain.z) if domain.z is not None else None
+        return cls(t_transform=t_tx, x_transform=x_tx, y_transform=y_tx, z_transform=z_tx)
 
     @property
     def dt_scale(self) -> float:
@@ -232,6 +240,26 @@ class AutoNormalizer(BaseModel):
         """Fourth-order dx^4 scaling factor."""
         return self.x_transform.scale_4 if self.x_transform else None
 
+    @property
+    def dy_scale(self) -> Optional[float]:
+        """First-order dy scaling factor."""
+        return self.y_transform.scale_1 if self.y_transform else None
+
+    @property
+    def dy2_scale(self) -> Optional[float]:
+        """Second-order dy^2 scaling factor."""
+        return self.y_transform.scale_2 if self.y_transform else None
+
+    @property
+    def dz_scale(self) -> Optional[float]:
+        """First-order dz scaling factor."""
+        return self.z_transform.scale_1 if self.z_transform else None
+
+    @property
+    def dz2_scale(self) -> Optional[float]:
+        """Second-order dz^2 scaling factor."""
+        return self.z_transform.scale_2 if self.z_transform else None
+
     def get_scaling_factors(self) -> Dict[str, float]:
         """Dictionary of all available derivative chain-rule multipliers."""
         factors: Dict[str, float] = {
@@ -245,19 +273,45 @@ class AutoNormalizer(BaseModel):
                 "dxxx": self.x_transform.scale_3,
                 "dxxxx": self.x_transform.scale_4,
             })
+        if self.y_transform is not None:
+            factors.update({
+                "dy": self.y_transform.scale_1,
+                "dyy": self.y_transform.scale_2,
+            })
+        if self.z_transform is not None:
+            factors.update({
+                "dz": self.z_transform.scale_1,
+                "dzz": self.z_transform.scale_2,
+            })
         return factors
 
-    def normalize_coords(self, t: float, x: Optional[float] = None) -> Tuple[float, Optional[float]]:
-        """Normalize coordinates (t, x) onto [-1, 1]."""
+    def normalize_coords(
+        self,
+        t: float,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+    ) -> Tuple[float, Optional[float], Optional[float], Optional[float]]:
+        """Normalize coordinates (t, x, y, z) onto [-1, 1]."""
         t_norm = self.t_transform.to_normalized(t)
         x_norm = self.x_transform.to_normalized(x) if (x is not None and self.x_transform) else None
-        return t_norm, x_norm
+        y_norm = self.y_transform.to_normalized(y) if (y is not None and self.y_transform) else None
+        z_norm = self.z_transform.to_normalized(z) if (z is not None and self.z_transform) else None
+        return t_norm, x_norm, y_norm, z_norm
 
-    def denormalize_coords(self, t_norm: float, x_norm: Optional[float] = None) -> Tuple[float, Optional[float]]:
+    def denormalize_coords(
+        self,
+        t_norm: float,
+        x_norm: Optional[float] = None,
+        y_norm: Optional[float] = None,
+        z_norm: Optional[float] = None,
+    ) -> Tuple[float, Optional[float], Optional[float], Optional[float]]:
         """De-normalize coordinates from [-1, 1] back to physical domain."""
         t_phys = self.t_transform.to_physical(t_norm)
         x_phys = self.x_transform.to_physical(x_norm) if (x_norm is not None and self.x_transform) else None
-        return t_phys, x_phys
+        y_phys = self.y_transform.to_physical(y_norm) if (y_norm is not None and self.y_transform) else None
+        z_phys = self.z_transform.to_physical(z_norm) if (z_norm is not None and self.z_transform) else None
+        return t_phys, x_phys, y_phys, z_phys
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +323,7 @@ class ProblemIR(BaseModel):
     id: str = Field(..., description="Unique problem slug (e.g. 'burgers', 'duffing')")
     name: str = Field(..., description="Full descriptive title")
     problem_type: ProblemType = Field(..., description="'ODE' or 'PDE'")
+    spatial_dim: Literal[0, 1, 2, 3] = Field(default=1, description="Spatial dimension count: 0 for ODE, 1/2/3 for PDEs")
     equation_latex: str = Field(..., description="LaTeX representation of the governing equation")
     derivatives: DerivativeSpec = Field(..., description="Order of spatial and time derivatives")
     domain: DomainSpec = Field(..., description="Spatiotemporal domain bounds")
@@ -284,6 +339,7 @@ class ProblemIR(BaseModel):
     @model_validator(mode="after")
     def validate_problem_consistency(self) -> ProblemIR:
         if self.problem_type == "ODE":
+            self.spatial_dim = 0
             if self.domain.x is not None:
                 raise ValueError("ODE problem must not define a spatial domain 'x'.")
             if self.derivatives.spatial_order != 0:
@@ -293,8 +349,14 @@ class ProblemIR(BaseModel):
         elif self.problem_type == "PDE":
             if self.domain.x is None:
                 raise ValueError("PDE problem must specify a spatial domain 'x'.")
+            if self.domain.z is not None:
+                self.spatial_dim = 3
+            elif self.domain.y is not None:
+                self.spatial_dim = 2
+            else:
+                self.spatial_dim = 1
             if self.derivatives.spatial_order == 0:
-                raise ValueError("1D+time PDE problem must have spatial_order >= 1.")
+                raise ValueError("PDE problem must have spatial_order >= 1.")
         return self
 
     def get_normalizer(self) -> AutoNormalizer:
@@ -627,11 +689,202 @@ def create_forced_duffing_ir() -> ProblemIR:
     )
 
 
+def create_kdv_soliton_ir() -> ProblemIR:
+    """Factory for Korteweg-de Vries (KdV) Soliton PDE Case Study:
+
+    ∂u/∂t + 6 * u * ∂u/∂x + ∂³u/∂x³ = 0
+    Domain: x ∈ [-10, 10], t ∈ [0, 1]
+    IC: u(x, 0) = 0.5 * sech(0.5 * x)^2
+    BC: Periodic at x = ±10
+    Invariant: mass (∫u dx)
+    Parameters: alpha (fixed = 6.0), beta (fixed = 1.0)
+    """
+    return ProblemIR(
+        id="kdv",
+        name="Korteweg-de Vries Soliton Equation",
+        problem_type="PDE",
+        equation_latex=r"\frac{\partial u}{\partial t} + 6\,u\,\frac{\partial u}{\partial x} + \frac{\partial^{3} u}{\partial x^{3}} = 0",
+        derivatives=DerivativeSpec(spatial_order=3, time_order=1),
+        domain=DomainSpec(
+            t=Domain1D(min_val=0.0, max_val=1.0),
+            x=Domain1D(min_val=-10.0, max_val=10.0),
+        ),
+        parameters=[
+            ParameterSpec(
+                name="alpha",
+                symbol="α",
+                latex_token=r"\alpha",
+                description="Advective coefficient",
+                mode="fixed",
+                value=6.0,
+            ),
+            ParameterSpec(
+                name="beta",
+                symbol="β",
+                latex_token=r"\beta",
+                description="Dispersion coefficient",
+                mode="fixed",
+                value=1.0,
+            ),
+        ],
+        initial_conditions=[
+            InitialCondition(
+                id="kdv_ic",
+                expression="u(x, 0) = 0.5 * sech(0.5 * x)^2",
+                location="t = 0",
+                order=0,
+                variable="u",
+            )
+        ],
+        boundary_conditions=[
+            BoundaryCondition(
+                id="kdv_bc_periodic",
+                kind="Periodic",
+                expression="u(-10, t) = u(+10, t)",
+                location="x = +-10",
+                coordinate="periodic",
+            )
+        ],
+        conservation_invariant="mass",
+        metadata={
+            "case_study": "Shallow Water Wave & Soliton",
+            "reference_solver": "Method-of-Lines Radau",
+            "u_scale": 1.0,
+        },
+    )
+
+
+def create_gray_scott_2d_ir() -> ProblemIR:
+    """Factory for 2D Gray-Scott / Reaction-Diffusion PDE Case Study:
+
+    ∂u/∂t = ν * (∂²u/∂x² + ∂²u/∂y²) + u * (1 - u²)
+    Domain: x, y ∈ [-1, 1], t ∈ [0, 0.5]
+    IC: u(x, y, 0) = exp(-6 * (x² + y²)) - 0.5
+    BC: Dirichlet u = 0 on outer boundary
+    """
+    return ProblemIR(
+        id="gray-scott-2d",
+        name="2D Gray-Scott Reaction-Diffusion",
+        problem_type="PDE",
+        spatial_dim=2,
+        equation_latex=r"\frac{\partial u}{\partial t} = \nu\,\left(\frac{\partial^{2} u}{\partial x^{2}} + \frac{\partial^{2} u}{\partial y^{2}}\right) + u\,(1 - u^{2})",
+        derivatives=DerivativeSpec(spatial_order=2, time_order=1),
+        domain=DomainSpec(
+            t=Domain1D(min_val=0.0, max_val=0.5),
+            x=Domain1D(min_val=-1.0, max_val=1.0),
+            y=Domain1D(min_val=-1.0, max_val=1.0),
+        ),
+        parameters=[
+            ParameterSpec(
+                name="nu",
+                symbol="ν",
+                latex_token=r"\nu",
+                description="Diffusion coefficient",
+                mode="fixed",
+                value=0.05,
+            ),
+        ],
+        initial_conditions=[
+            InitialCondition(
+                id="gray_scott_ic",
+                expression="u(x, y, 0) = exp(-6*(x**2 + y**2)) - 0.5",
+                location="t = 0",
+                order=0,
+                variable="u",
+            )
+        ],
+        boundary_conditions=[
+            BoundaryCondition(
+                id="gray_scott_bc_dirichlet",
+                kind="Dirichlet",
+                expression="u(boundary, t) = 0",
+                location="x = +-1, y = +-1",
+                coordinate="both",
+            )
+        ],
+        conservation_invariant="none",
+        metadata={
+            "case_study": "2D Pattern Formation & Reaction Diffusion",
+            "reference_solver": "2D Method-of-Lines Vectorized",
+            "u_scale": 1.0,
+        },
+    )
+
+
+def create_heat_diffusion_3d_ir() -> ProblemIR:
+    """Factory for 3D Heat / Nonlinear Diffusion PDE Case Study:
+
+    ∂u/∂t = α * (∂²u/∂x² + ∂²u/∂y² + ∂²u/∂z²) - β * u³
+    Domain: x, y, z ∈ [-1, 1], t ∈ [0, 0.3]
+    IC: u(x, y, z, 0) = sin(πx) * sin(πy) * sin(πz)
+    BC: Dirichlet u = 0 on outer boundary
+    """
+    return ProblemIR(
+        id="heat-3d",
+        name="3D Nonlinear Heat Diffusion",
+        problem_type="PDE",
+        spatial_dim=3,
+        equation_latex=r"\frac{\partial u}{\partial t} = \alpha\,\left(\frac{\partial^{2} u}{\partial x^{2}} + \frac{\partial^{2} u}{\partial y^{2}} + \frac{\partial^{2} u}{\partial z^{2}}\right) - \beta\,u^{3}",
+        derivatives=DerivativeSpec(spatial_order=2, time_order=1),
+        domain=DomainSpec(
+            t=Domain1D(min_val=0.0, max_val=0.3),
+            x=Domain1D(min_val=-1.0, max_val=1.0),
+            y=Domain1D(min_val=-1.0, max_val=1.0),
+            z=Domain1D(min_val=-1.0, max_val=1.0),
+        ),
+        parameters=[
+            ParameterSpec(
+                name="alpha",
+                symbol="α",
+                latex_token=r"\alpha",
+                description="Thermal diffusivity",
+                mode="fixed",
+                value=0.08,
+            ),
+            ParameterSpec(
+                name="beta",
+                symbol="β",
+                latex_token=r"\beta",
+                description="Nonlinear radiative cooling coefficient",
+                mode="fixed",
+                value=0.5,
+            ),
+        ],
+        initial_conditions=[
+            InitialCondition(
+                id="heat_3d_ic",
+                expression="u(x, y, z, 0) = sin(pi*x)*sin(pi*y)*sin(pi*z)",
+                location="t = 0",
+                order=0,
+                variable="u",
+            )
+        ],
+        boundary_conditions=[
+            BoundaryCondition(
+                id="heat_3d_bc_dirichlet",
+                kind="Dirichlet",
+                expression="u(boundary, t) = 0",
+                location="x, y, z = +-1",
+                coordinate="both",
+            )
+        ],
+        conservation_invariant="none",
+        metadata={
+            "case_study": "3D Volumetric Thermal Dissipation",
+            "reference_solver": "3D Method-of-Lines Vectorized",
+            "u_scale": 1.0,
+        },
+    )
+
+
 CANONICAL_FACTORIES = {
     "burgers": create_viscous_burgers_ir,
     "allen-cahn": create_allen_cahn_ir,
     "nlse": create_cubic_quintic_nlse_ir,
     "duffing": create_forced_duffing_ir,
+    "kdv": create_kdv_soliton_ir,
+    "gray-scott-2d": create_gray_scott_2d_ir,
+    "heat-3d": create_heat_diffusion_3d_ir,
 }
 
 

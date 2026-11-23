@@ -42,3 +42,8 @@ sciagent/dist/
 *.log
 .DS_Store
 Thumbs.db
+backend/data/
+frontend/backend/
+test_figs_2d/
+*.npy
+

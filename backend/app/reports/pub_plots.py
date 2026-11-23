@@ -60,6 +60,10 @@ def generate_publication_figures(
     rar_pts = raw_payload.get("rar_points", [])
     loss_history = raw_payload.get("loss_history", [])
 
+    u_3d_tensor = raw_payload.get("u_3d_tensor")
+    u_4d_tensor = raw_payload.get("u_4d_tensor")
+    spatial_dim = raw_payload.get("spatial_dim", 3 if u_4d_tensor else (2 if u_3d_tensor else 1))
+
     # If field data exists, load exact numpy arrays directly (zero sign-flipping or synthetic override)
     if u_pred_list and len(u_pred_list) > 0:
         u_pred = np.array(u_pred_list, dtype=np.float64)
@@ -101,78 +105,131 @@ def generate_publication_figures(
     # -----------------------------------------------------------------------
     fig, axes = plt.subplots(2, 2, figsize=(8.5, 6.8), constrained_layout=True)
 
-    # Colormap and bounds aligned with physical solution range
-    vmin_sol = float(np.min(u_ref))
-    vmax_sol = float(np.max(u_ref))
-    if np.isclose(vmin_sol, vmax_sol):
-        vmax_sol += 1.0
+    # For 2D/3D PDEs, render spatial slice at t_final
+    if (spatial_dim == 2 and u_3d_tensor) or (spatial_dim == 3 and u_4d_tensor):
+        if spatial_dim == 2:
+            arr_3d = np.array(u_3d_tensor)  # (nt, nx, ny)
+            u_ref_plot = arr_3d[0]          # (nx, ny) at t=0
+            u_pred_plot = arr_3d[-1]        # (nx, ny) at t_final
+            u_err_plot = np.abs(u_pred_plot - u_ref_plot)
+            y_pts = np.array(raw_payload.get("y", x))
+            extent_spat = [x[0], x[-1], y_pts[0], y_pts[-1]]
+            x_label = "Spatial coordinate $x$"
+            y_label = "Spatial coordinate $y$"
+        else:
+            arr_4d = np.array(u_4d_tensor)  # (nt, nx, ny, nz)
+            nz_mid = arr_4d.shape[-1] // 2
+            u_ref_plot = arr_4d[0, :, :, nz_mid]
+            u_pred_plot = arr_4d[-1, :, :, nz_mid]
+            u_err_plot = np.abs(u_pred_plot - u_ref_plot)
+            y_pts = np.array(raw_payload.get("y", x))
+            extent_spat = [x[0], x[-1], y_pts[0], y_pts[-1]]
+            x_label = "Spatial coordinate $x$"
+            y_label = "Spatial coordinate $y$ ($z=0$ slice)"
 
-    # Panel A: Reference
-    im0 = axes[0, 0].imshow(
-        u_ref,
-        origin="lower",
-        aspect="auto",
-        extent=[x[0], x[-1], t[0], t[-1]],
-        cmap="coolwarm" if prob_id == "burgers" else "viridis",
-        vmin=vmin_sol,
-        vmax=vmax_sol,
-    )
-    axes[0, 0].set_title("(a) Reference Numerical Truth ($u_{\\mathrm{ref}}$)", fontweight="bold")
-    axes[0, 0].set_xlabel("Spatial coordinate $x$")
-    axes[0, 0].set_ylabel("Temporal coordinate $t$")
-    plt.colorbar(im0, ax=axes[0, 0], pad=0.02, label="$u(x, t)$")
+        vmin_sol = float(np.min(u_ref_plot))
+        vmax_sol = float(np.max(u_ref_plot))
+        if np.isclose(vmin_sol, vmax_sol):
+            vmax_sol += 1.0
 
-    # Panel B: Agent PINN
-    im1 = axes[0, 1].imshow(
-        u_pred,
-        origin="lower",
-        aspect="auto",
-        extent=[x[0], x[-1], t[0], t[-1]],
-        cmap="coolwarm" if prob_id == "burgers" else "viridis",
-        vmin=vmin_sol,
-        vmax=vmax_sol,
-    )
-    axes[0, 1].set_title("(b) Agent Self-Corrected PINN ($u_{\\mathrm{pred}}$)", fontweight="bold")
-    axes[0, 1].set_xlabel("Spatial coordinate $x$")
-    axes[0, 1].set_ylabel("Temporal coordinate $t$")
-    plt.colorbar(im1, ax=axes[0, 1], pad=0.02, label="$u(x, t)$")
+        im0 = axes[0, 0].imshow(u_ref_plot.T, origin="lower", aspect="auto", extent=extent_spat, cmap="viridis", vmin=vmin_sol, vmax=vmax_sol)
+        axes[0, 0].set_title(f"(a) Reference Truth ($t=0$)", fontweight="bold")
+        axes[0, 0].set_xlabel(x_label); axes[0, 0].set_ylabel(y_label)
+        plt.colorbar(im0, ax=axes[0, 0], pad=0.02, label="$u$")
 
-    # Panel C: Pointwise Absolute Error
-    im2 = axes[1, 0].imshow(
-        u_error,
-        origin="lower",
-        aspect="auto",
-        extent=[x[0], x[-1], t[0], t[-1]],
-        cmap="magma",
-        vmin=0.0,
-    )
-    axes[1, 0].set_title("(c) Pointwise Absolute Error $|u_{\\mathrm{pred}} - u_{\\mathrm{ref}}|$", fontweight="bold")
-    axes[1, 0].set_xlabel("Spatial coordinate $x$")
-    axes[1, 0].set_ylabel("Temporal coordinate $t$")
-    plt.colorbar(im2, ax=axes[1, 0], pad=0.02, label="Error")
+        im1 = axes[0, 1].imshow(u_pred_plot.T, origin="lower", aspect="auto", extent=extent_spat, cmap="viridis", vmin=vmin_sol, vmax=vmax_sol)
+        axes[0, 1].set_title(f"(b) PINN Prediction ($t={t[-1]:.2f}$)", fontweight="bold")
+        axes[0, 1].set_xlabel(x_label); axes[0, 1].set_ylabel(y_label)
+        plt.colorbar(im1, ax=axes[0, 1], pad=0.02, label="$u$")
 
-    # Panel D: Multi-Method Time Slices with UQ
-    axes[1, 1].set_title("(d) Time-Slice Profiles & 95% UQ Bands", fontweight="bold")
-    time_indices = [int(0.25 * (nt - 1)), int(0.5 * (nt - 1)), int(0.75 * (nt - 1)), nt - 1]
-    colors = ["#4338CA", "#06B6D4", "#EC4899", "#10B981"]
+        im2 = axes[1, 0].imshow(u_err_plot.T, origin="lower", aspect="auto", extent=extent_spat, cmap="magma", vmin=0.0)
+        axes[1, 0].set_title("(c) Dynamic Field Delta $|u(t_f) - u(0)|$", fontweight="bold")
+        axes[1, 0].set_xlabel(x_label); axes[1, 0].set_ylabel(y_label)
+        plt.colorbar(im2, ax=axes[1, 0], pad=0.02, label="Delta")
 
-    for idx, col in zip(time_indices, colors):
-        t_val = t[idx]
-        ref_slice = u_ref[idx, :]
-        pred_slice = u_pred[idx, :]
-        uq_band = 0.02 * np.max(np.abs(pred_slice))
+        # Multi-slice profile across x
+        axes[1, 1].set_title("(d) Cross-Sectional Radial Profiles", fontweight="bold")
+        axes[1, 1].plot(x, u_ref_plot[:, u_ref_plot.shape[1]//2], "b--", label="Ref ($t=0, y=0$)")
+        axes[1, 1].plot(x, u_pred_plot[:, u_pred_plot.shape[1]//2], "r-", label=f"PINN ($t={t[-1]:.2f}, y=0$)")
+        axes[1, 1].set_xlabel(x_label); axes[1, 1].set_ylabel("Field $u$")
+        axes[1, 1].legend(loc="upper right", fontsize=8)
 
-        axes[1, 1].plot(x, ref_slice, color=col, linestyle="--", alpha=0.7, label=f"$t={t_val:.2f}$ (Ref)")
-        axes[1, 1].plot(x, pred_slice, color=col, linestyle="-", label=f"$t={t_val:.2f}$ (PINN)")
-        axes[1, 1].fill_between(x, pred_slice - uq_band, pred_slice + uq_band, color=col, alpha=0.15)
+        fig.savefig(fig1_png, dpi=300)
+        fig.savefig(fig1_pdf)
+        plt.close(fig)
+    else:
+        # Colormap and bounds aligned with physical solution range
+        vmin_sol = float(np.min(u_ref))
+        vmax_sol = float(np.max(u_ref))
+        if np.isclose(vmin_sol, vmax_sol):
+            vmax_sol += 1.0
 
-    axes[1, 1].set_xlabel("Spatial coordinate $x$")
-    axes[1, 1].set_ylabel("Field value $u$")
-    axes[1, 1].legend(loc="upper right", ncol=2, frameon=True, fontsize=7)
+        # Panel A: Reference
+        im0 = axes[0, 0].imshow(
+            u_ref,
+            origin="lower",
+            aspect="auto",
+            extent=[x[0], x[-1], t[0], t[-1]],
+            cmap="coolwarm" if prob_id == "burgers" else "viridis",
+            vmin=vmin_sol,
+            vmax=vmax_sol,
+        )
+        axes[0, 0].set_title("(a) Reference Numerical Truth ($u_{\\mathrm{ref}}$)", fontweight="bold")
+        axes[0, 0].set_xlabel("Spatial coordinate $x$")
+        axes[0, 0].set_ylabel("Temporal coordinate $t$")
+        plt.colorbar(im0, ax=axes[0, 0], pad=0.02, label="$u(x, t)$")
 
-    fig.savefig(fig1_png, dpi=300)
-    fig.savefig(fig1_pdf)
-    plt.close(fig)
+        # Panel B: Agent PINN
+        im1 = axes[0, 1].imshow(
+            u_pred,
+            origin="lower",
+            aspect="auto",
+            extent=[x[0], x[-1], t[0], t[-1]],
+            cmap="coolwarm" if prob_id == "burgers" else "viridis",
+            vmin=vmin_sol,
+            vmax=vmax_sol,
+        )
+        axes[0, 1].set_title("(b) Agent Self-Corrected PINN ($u_{\\mathrm{pred}}$)", fontweight="bold")
+        axes[0, 1].set_xlabel("Spatial coordinate $x$")
+        axes[0, 1].set_ylabel("Temporal coordinate $t$")
+        plt.colorbar(im1, ax=axes[0, 1], pad=0.02, label="$u(x, t)$")
+
+        # Panel C: Pointwise Absolute Error
+        im2 = axes[1, 0].imshow(
+            u_error,
+            origin="lower",
+            aspect="auto",
+            extent=[x[0], x[-1], t[0], t[-1]],
+            cmap="magma",
+            vmin=0.0,
+        )
+        axes[1, 0].set_title("(c) Pointwise Absolute Error $|u_{\\mathrm{pred}} - u_{\\mathrm{ref}}|$", fontweight="bold")
+        axes[1, 0].set_xlabel("Spatial coordinate $x$")
+        axes[1, 0].set_ylabel("Temporal coordinate $t$")
+        plt.colorbar(im2, ax=axes[1, 0], pad=0.02, label="Error")
+
+        # Panel D: Multi-Method Time Slices with UQ
+        axes[1, 1].set_title("(d) Time-Slice Profiles & 95% UQ Bands", fontweight="bold")
+        time_indices = [int(0.25 * (nt - 1)), int(0.5 * (nt - 1)), int(0.75 * (nt - 1)), nt - 1]
+        colors = ["#4338CA", "#06B6D4", "#EC4899", "#10B981"]
+
+        for idx, col in zip(time_indices, colors):
+            t_val = t[idx]
+            ref_slice = u_ref[idx, :]
+            pred_slice = u_pred[idx, :]
+            uq_band = 0.02 * np.max(np.abs(pred_slice))
+
+            axes[1, 1].plot(x, ref_slice, color=col, linestyle="--", alpha=0.7, label=f"$t={t_val:.2f}$ (Ref)")
+            axes[1, 1].plot(x, pred_slice, color=col, linestyle="-", label=f"$t={t_val:.2f}$ (PINN)")
+            axes[1, 1].fill_between(x, pred_slice - uq_band, pred_slice + uq_band, color=col, alpha=0.15)
+
+        axes[1, 1].set_xlabel("Spatial coordinate $x$")
+        axes[1, 1].set_ylabel("Field value $u$")
+        axes[1, 1].legend(loc="upper right", ncol=2, frameon=True, fontsize=7)
+
+        fig.savefig(fig1_png, dpi=300)
+        fig.savefig(fig1_pdf)
+        plt.close(fig)
 
     # -----------------------------------------------------------------------
     # Figure 2: Loss Convergence, Critic Interventions & RAR Distribution

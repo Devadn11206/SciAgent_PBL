@@ -62,6 +62,15 @@ export function ReportView({ activeProblem, activeRunId, agentResult, actions }:
   const [customJournal, setCustomJournal] = useState('Physical Review Letters (PRL)')
   const [customNotes, setCustomNotes] = useState('')
 
+  // 6-Section Academic Manuscript Outline state
+  const [activeSection, setActiveSection] = useState<string>('abstract')
+  const [secAbstract, setSecAbstract] = useState('')
+  const [secIntro, setSecIntro] = useState('')
+  const [secMath, setSecMath] = useState('')
+  const [secMethod, setSecMethod] = useState('')
+  const [secResults, setSecResults] = useState('')
+  const [secConclusion, setSecConclusion] = useState('')
+
   // Determine effective run ID strictly: do NOT fake an ID if there is genuinely no run
   const hasRealRun = Boolean(activeRunId || agentResult?.run_id)
   const effectiveRunId = activeRunId || agentResult?.run_id || null
@@ -73,12 +82,21 @@ export function ReportView({ activeProblem, activeRunId, agentResult, actions }:
     referenceSolver: 'High-Order Numerical Solver',
   }
 
-  // Set default title when problem changes
+  // Set default title & extract prose when agentResult or problem changes
   useEffect(() => {
     if (!customTitle) {
       setCustomTitle(`Autonomous Scientific Discovery & Neural Verification: ${activeProblem.name}`)
     }
-  }, [activeProblem.name, customTitle])
+    const dbProse = agentResult?.db_record?.raw_payload?.academic_prose || (agentResult as any)?.research_summary
+    if (dbProse) {
+      if (dbProse.abstract && !secAbstract) setSecAbstract(dbProse.abstract)
+      if (dbProse.introduction && !secIntro) setSecIntro(dbProse.introduction)
+      if (dbProse.mathematical_formulation && !secMath) setSecMath(dbProse.mathematical_formulation)
+      if (dbProse.methodology && !secMethod) setSecMethod(dbProse.methodology)
+      if (dbProse.results_and_discussion && !secResults) setSecResults(dbProse.results_and_discussion)
+      if (dbProse.conclusion && !secConclusion) setSecConclusion(dbProse.conclusion)
+    }
+  }, [activeProblem.name, customTitle, agentResult])
 
   // Trigger PDF generation when a real run is active
   useEffect(() => {
@@ -132,6 +150,12 @@ export function ReportView({ activeProblem, activeRunId, agentResult, actions }:
         journal: customJournal,
         custom_notes: customNotes,
         typst_override: viewTab === 'typst' ? typstSource : undefined,
+        abstract: secAbstract || undefined,
+        introduction: secIntro || undefined,
+        mathematical_formulation: secMath || undefined,
+        methodology: secMethod || undefined,
+        results_and_discussion: secResults || undefined,
+        conclusion: secConclusion || undefined,
       })
       setPdfUrl(`${getReportPdfUrl(effectiveRunId)}?t=${Date.now()}`)
       setPdfReady(true)
@@ -231,53 +255,177 @@ export function ReportView({ activeProblem, activeRunId, agentResult, actions }:
         </div>
 
         {showCustomizer && (
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-xs">
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Paper Title</label>
-              <input
-                type="text"
-                value={customTitle}
-                onChange={(e) => setCustomTitle(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
-                placeholder="Manuscript Title..."
-              />
+          <div className="mt-4 border-t border-slate-100 pt-4 text-xs space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Paper Title</label>
+                <input
+                  type="text"
+                  value={customTitle}
+                  onChange={(e) => setCustomTitle(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
+                  placeholder="Manuscript Title..."
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Target Journal / Venue</label>
+                <input
+                  type="text"
+                  value={customJournal}
+                  onChange={(e) => setCustomJournal(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
+                  placeholder="Physical Review Letters (PRL)"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Authors</label>
+                <input
+                  type="text"
+                  value={customAuthors}
+                  onChange={(e) => setCustomAuthors(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
+                  placeholder="SciAgent Autonomous Discovery Team"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Affiliation</label>
+                <input
+                  type="text"
+                  value={customAffiliation}
+                  onChange={(e) => setCustomAffiliation(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
+                  placeholder="Laboratory for AI-Accelerated Physical Sciences"
+                />
+              </div>
             </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Target Journal / Venue</label>
-              <input
-                type="text"
-                value={customJournal}
-                onChange={(e) => setCustomJournal(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
-                placeholder="Physical Review Letters (PRL)"
-              />
+
+            {/* 6-Section Interactive Manuscript Outline & Section Editor */}
+            <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-3.5">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                  <span className="flex h-2 w-2 rounded-full bg-royal" />
+                  6-Section Academic Manuscript Outline & Content Editor
+                </span>
+                <span className="text-[11px] text-slate-500">Live Equation-Tailored Prose</span>
+              </div>
+
+              {/* Section Selector Chips */}
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {[
+                  { id: 'abstract', label: 'Abstract' },
+                  { id: 'intro', label: '1. Introduction' },
+                  { id: 'math', label: '2. Mathematical Formulation' },
+                  { id: 'method', label: '3. Methodology' },
+                  { id: 'results', label: '4. Results & Discussion' },
+                  { id: 'conclusion', label: '5. Conclusion' },
+                ].map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => setActiveSection(s.id)}
+                    className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-all ${
+                      activeSection === s.id
+                        ? 'bg-royal text-white shadow-sm'
+                        : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Active Section Textarea Editor */}
+              {activeSection === 'abstract' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 text-[11px]">
+                    Abstract (Scholarly Summary of Dynamics & Convergence)
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={secAbstract}
+                    onChange={(e) => setSecAbstract(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-800 focus:border-royal focus:outline-none font-sans leading-relaxed"
+                    placeholder="Enter academic abstract..."
+                  />
+                </div>
+              )}
+              {activeSection === 'intro' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 text-[11px]">
+                    1. Introduction (Physical Phenomenon & SciAgent Architecture)
+                  </label>
+                  <textarea
+                    rows={5}
+                    value={secIntro}
+                    onChange={(e) => setSecIntro(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-800 focus:border-royal focus:outline-none font-sans leading-relaxed"
+                    placeholder="Enter introduction..."
+                  />
+                </div>
+              )}
+              {activeSection === 'math' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 text-[11px]">
+                    2. Mathematical Formulation (Governing Equation, Domain & Invariants)
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={secMath}
+                    onChange={(e) => setSecMath(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-800 focus:border-royal focus:outline-none font-sans leading-relaxed"
+                    placeholder="Enter mathematical formulation..."
+                  />
+                </div>
+              )}
+              {activeSection === 'method' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 text-[11px]">
+                    3. Methodology (Fourier Embeddings, Curriculum & Curvature Polish)
+                  </label>
+                  <textarea
+                    rows={5}
+                    value={secMethod}
+                    onChange={(e) => setSecMethod(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-800 focus:border-royal focus:outline-none font-sans leading-relaxed"
+                    placeholder="Enter methodology..."
+                  />
+                </div>
+              )}
+              {activeSection === 'results' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 text-[11px]">
+                    4. Results & Discussion (Quantitative Interpretation of Figures & Tables)
+                  </label>
+                  <textarea
+                    rows={5}
+                    value={secResults}
+                    onChange={(e) => setSecResults(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-800 focus:border-royal focus:outline-none font-sans leading-relaxed"
+                    placeholder="Enter results and discussion..."
+                  />
+                </div>
+              )}
+              {activeSection === 'conclusion' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1 text-[11px]">
+                    5. Conclusion (Key Insights & Verification Summary)
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={secConclusion}
+                    onChange={(e) => setSecConclusion(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-800 focus:border-royal focus:outline-none font-sans leading-relaxed"
+                    placeholder="Enter conclusion..."
+                  />
+                </div>
+              )}
             </div>
+
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Authors</label>
-              <input
-                type="text"
-                value={customAuthors}
-                onChange={(e) => setCustomAuthors(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
-                placeholder="SciAgent Autonomous Discovery Team"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">Affiliation</label>
-              <input
-                type="text"
-                value={customAffiliation}
-                onChange={(e) => setCustomAffiliation(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none"
-                placeholder="Laboratory for AI-Accelerated Physical Sciences"
-              />
-            </div>
-            <div className="md:col-span-2">
               <label className="block font-semibold text-slate-700 mb-1">
-                Custom Discussion & Physical Interpretation Notes (Appends to Section 5)
+                Author Supplementary Notes & Discussion (Appends to Section 4 / Discussion)
               </label>
               <textarea
-                rows={3}
+                rows={2}
                 value={customNotes}
                 onChange={(e) => setCustomNotes(e.target.value)}
                 className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-royal focus:outline-none font-mono"

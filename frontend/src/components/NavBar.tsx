@@ -43,34 +43,34 @@ export function NavBar({ view, onView, currentRunId, onPickHistoryRun, onExport,
   }, [])
 
   return (
-    <div className="no-print fixed inset-x-0 top-3 z-40 flex justify-center px-2 md:px-4">
-      <nav className="glass flex w-full max-w-[1600px] flex-nowrap items-center justify-between gap-1.5 md:gap-2.5 !rounded-full px-2.5 md:px-4 py-2">
-        <div className="flex shrink-0 items-center gap-2 pl-0.5 pr-1 md:pr-2">
-          <span className="flex h-8 w-8 md:h-9 md:w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-royal via-fuchsia-500 to-turq text-white shadow-lg shadow-violet-300/60"><Sparkles size={17} /></span>
-          <span className="text-[16px] md:text-[17px] font-extrabold tracking-tight text-indigo-950">Sci<span className="text-royal">Agent</span></span>
+    <div className="no-print fixed inset-x-0 top-3 z-40 flex justify-center px-1.5 md:px-3">
+      <nav className="glass flex w-full max-w-[1600px] flex-nowrap items-center justify-between gap-1 md:gap-1.5 !rounded-full px-2 md:px-2.5 py-1.5">
+        <div className="flex shrink-0 items-center gap-1.5 pl-0.5 pr-1 md:pr-1.5">
+          <span className="flex h-8 w-8 md:h-9 md:w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-royal via-fuchsia-500 to-turq text-white shadow-lg shadow-violet-300/60"><Sparkles size={16} /></span>
+          <span className="text-[15px] md:text-[16px] font-extrabold tracking-tight text-indigo-950">Sci<span className="text-royal">Agent</span></span>
         </div>
 
-        <div className="flex flex-nowrap items-center gap-1 md:gap-1.5">
+        <div className="flex flex-nowrap items-center gap-1">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => onView(t.id)}
               className={cx(
-                'flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-xs xl:px-3.5 xl:py-2 xl:text-[13px] font-semibold transition',
+                'flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-xs xl:px-3 xl:py-1.5 xl:text-[13px] font-semibold transition',
                 view === t.id ? 'bg-royal text-white shadow-md shadow-violet-300/60' : 'text-violet-800 hover:bg-violet-100/70'
               )}
             >
-              <t.icon size={14} /> {t.label}
+              <t.icon size={13} /> {t.label}
             </button>
           ))}
         </div>
 
-        <div className="flex shrink-0 flex-nowrap items-center gap-1.5 md:gap-2">
+        <div className="flex shrink-0 flex-nowrap items-center gap-1 md:gap-1.5">
           <Dropdown
             trigger={(open, toggle) => (
-              <button onClick={toggle} className="pill flex items-center gap-1.5 px-3 py-2 text-[13px] font-semibold text-violet-800 hover:bg-white">
-                <History size={14} /> <span className="hidden 2xl:inline">Experiment History</span><span className="2xl:hidden">History</span>
-                <ChevronDown size={13} className={cx('transition', open && 'rotate-180')} />
+              <button onClick={toggle} className="pill flex items-center gap-1.5 px-2.5 py-1.5 text-xs xl:text-[13px] font-semibold text-violet-800 hover:bg-white">
+                <History size={13} /> <span className="hidden 2xl:inline">Experiment History</span><span className="2xl:hidden">History</span>
+                <ChevronDown size={12} className={cx('transition', open && 'rotate-180')} />
               </button>
             )}
           >
@@ -125,16 +125,16 @@ export function NavBar({ view, onView, currentRunId, onPickHistoryRun, onExport,
           {/* Advanced FastMCP Server Pill */}
           <button
             onClick={() => setMcpModalOpen(true)}
-            className="flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50/70 px-3 py-2 text-[13px] font-semibold text-royal transition hover:bg-violet-100 hover:border-violet-300"
+            className="flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50/70 px-2.5 py-1.5 text-xs xl:text-[13px] font-semibold text-royal transition hover:bg-violet-100 hover:border-violet-300"
             title="Inspect Advanced FastMCP Core Tools & Client Config"
           >
-            <Terminal size={14} />
+            <Terminal size={13} />
             <span className="hidden xl:inline">MCP v2: 5 Tools · Streamable</span>
             <span className="xl:hidden">MCP</span>
           </button>
 
           <span className={cx(
-            'flex items-center gap-2 rounded-full border px-3 py-2 text-[13px] font-semibold transition',
+            'flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs xl:text-[13px] font-semibold transition',
             ollama.online ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'
           )}>
             <span className="relative flex h-2 w-2">
@@ -149,8 +149,8 @@ export function NavBar({ view, onView, currentRunId, onPickHistoryRun, onExport,
 
           <Dropdown
             trigger={(_, toggle) => (
-              <button onClick={toggle} className="flex items-center gap-1.5 rounded-full bg-indigo-950 px-3.5 py-2 text-[13px] font-semibold text-white transition hover:bg-indigo-900" aria-label="Quick export">
-                <Download size={14} /> <span className="hidden xl:inline">Export</span>
+              <button onClick={toggle} className="flex items-center gap-1.5 rounded-full bg-indigo-950 px-3 py-1.5 text-xs xl:text-[13px] font-semibold text-white transition hover:bg-indigo-900" aria-label="Quick export">
+                <Download size={13} /> <span className="hidden xl:inline">Export</span>
               </button>
             )}
           >
@@ -160,7 +160,7 @@ export function NavBar({ view, onView, currentRunId, onPickHistoryRun, onExport,
                   { label: 'Single-column PDF (Typst)', icon: FileText, run: onExport.pdf },
                   { label: 'LaTeX tables (.tex)', icon: Table2, run: onExport.tex },
                   { label: 'Figures 300 DPI (.zip)', icon: Images, run: onExport.figs },
-                  { label: 'Reproducible script (.py)', icon: FileCode2, run: onExport.py },
+                  { label: 'Standalone PyTorch Script (.py)', icon: FileCode2, run: onExport.py },
                 ].map((i) => (
                   <button key={i.label} onClick={() => { i.run(); close() }} className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-semibold text-indigo-950 transition hover:bg-violet-50">
                     <i.icon size={15} className="text-royal" /> {i.label}

@@ -73,6 +73,7 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
   const [isPlaying, setIsPlaying] = useState(false)
   const [playSpeed, setPlaySpeed] = useState<number>(1) // 0.5x, 1x, 2x
   const [timeIndex, setTimeIndex] = useState(0)
+  const [zSliceIndex, setZSliceIndex] = useState(0)
   const animTimer = useRef<number | null>(null)
 
   // Side-by-Side Run Diff State
@@ -157,9 +158,13 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
   // Extract arrays from active run or numerical solution
   const dbRec = agentResult?.db_record
   const rawPayload = dbRec?.raw_payload || {}
+  const isMultiD = (activeProblem.spatial_dim ?? 1) >= 2 || (rawPayload.spatial_dim ?? 1) >= 2 || numericalSolution?.spatial_dim !== undefined && numericalSolution.spatial_dim >= 2
+  const is3D = (activeProblem.spatial_dim ?? 1) === 3 || rawPayload.spatial_dim === 3 || numericalSolution?.spatial_dim === 3
 
   // Enforce true physical coordinate arrays
   const xDomain = activeProblem.domain.x || { min_val: -1.0, max_val: 1.0 }
+  const yDomain = activeProblem.domain.y || { min_val: -1.0, max_val: 1.0 }
+  const zDomain = activeProblem.domain.z || { min_val: -1.0, max_val: 1.0 }
   const tDomain = activeProblem.domain.t || { min_val: 0.0, max_val: 1.0 }
 
   const xGrid = useMemo(() => {
@@ -169,6 +174,20 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
     const N = 64
     return Array.from({ length: N }, (_, i) => xDomain.min_val + (i / (N - 1)) * (xDomain.max_val - xDomain.min_val))
   }, [rawPayload.x_grid, numericalSolution?.x, xDomain.min_val, xDomain.max_val])
+
+  const yGrid = useMemo(() => {
+    if (rawPayload.y && rawPayload.y.length > 0) return rawPayload.y
+    if (numericalSolution?.y && numericalSolution.y.length > 0) return numericalSolution.y
+    const N = 48
+    return Array.from({ length: N }, (_, i) => yDomain.min_val + (i / (N - 1)) * (yDomain.max_val - yDomain.min_val))
+  }, [rawPayload.y, numericalSolution?.y, yDomain.min_val, yDomain.max_val])
+
+  const zGrid = useMemo(() => {
+    if (rawPayload.z && rawPayload.z.length > 0) return rawPayload.z
+    if (numericalSolution?.z && numericalSolution.z.length > 0) return numericalSolution.z
+    const N = 24
+    return Array.from({ length: N }, (_, i) => zDomain.min_val + (i / (N - 1)) * (zDomain.max_val - zDomain.min_val))
+  }, [rawPayload.z, numericalSolution?.z, zDomain.min_val, zDomain.max_val])
 
   const tGrid = useMemo(() => {
     if (rawPayload.t_grid && rawPayload.t_grid.length > 0) return rawPayload.t_grid
@@ -190,6 +209,27 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
 
   const currentPred = variant === 'naive' ? uPredT1 : uPredFinal
   const currentErr = variant === 'naive' ? uErrT1 : uErrFinal
+
+  // Shared zmin and zmax bounds computed from uRef to lock colorbars across heatmaps
+  const { zMinShared, zMaxShared } = useMemo(() => {
+    if (!uRef || uRef.length === 0) return { zMinShared: undefined, zMaxShared: undefined }
+    let minVal = Infinity
+    let maxVal = -Infinity
+    for (let r = 0; r < uRef.length; r++) {
+      const row = uRef[r]
+      if (row) {
+        for (let c = 0; c < row.length; c++) {
+          const v = row[c]
+          if (v < minVal) minVal = v
+          if (v > maxVal) maxVal = v
+        }
+      }
+    }
+    if (minVal === Infinity || maxVal === -Infinity) {
+      return { zMinShared: undefined, zMaxShared: undefined }
+    }
+    return { zMinShared: minVal, zMaxShared: maxVal }
+  }, [uRef])
 
   // Benchmark scores from SQLite with strict number formatting
   const benchRows = useMemo(() => {
@@ -300,6 +340,7 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
   // 2D/3D Plotly Figure Generator with real physical x and t axes
   const makeSurfaceOrHeat = (z: number[][], kind: 'ref' | 'pred' | 'err') => {
     const scale = kind === 'ref' ? SOL_SCALE : kind === 'pred' ? PRED_SCALE : ERR_SCALE
+    const useSharedZ = (kind === 'ref' || kind === 'pred') && zMinShared !== undefined && zMaxShared !== undefined
     if (mode === '2d') {
       const traces: any[] = [
         {
@@ -309,6 +350,8 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
           z,
           colorscale: scale,
           zsmooth: 'best',
+          zmin: useSharedZ ? zMinShared : undefined,
+          zmax: useSharedZ ? zMaxShared : undefined,
           colorbar: { thickness: 10, len: 0.9, outlinewidth: 0, exponentformat: 'e' },
           hoverinfo: 'x+y+z',
         },
@@ -364,6 +407,8 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
           y: tGrid,
           z,
           colorscale: scale,
+          cmin: useSharedZ ? zMinShared : undefined,
+          cmax: useSharedZ ? zMaxShared : undefined,
           showscale: false,
           lighting: { ambient: 0.85, diffuse: 0.5, specular: 0.15, roughness: 0.6 },
         },
@@ -923,14 +968,24 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
           l2t = Math.sqrt(num) / (Math.sqrt(den) + 1e-12)
         }
 
+        // Check if 2D/3D spatial slices exist for animated (x, y) spatial rendering
+        const u2dSlices = numericalSolution?.u_2d_slices || rawPayload.u_2d_slices
+        const has2dSpatial = isMultiD && Array.isArray(u2dSlices) && u2dSlices.length > 0
+        const active2dGrid = has2dSpatial ? u2dSlices[Math.min(curIdx, u2dSlices.length - 1)].grid : null
+
         return (
           <Card
             title={
               <div className="flex flex-wrap items-center gap-2.5">
-                <span>Animated Wave Time-Scrubber</span>
+                <span>{isMultiD ? 'Animated Multi-D Cross-Sectional Scrubber' : 'Animated Wave Time-Scrubber'}</span>
                 <span className="mono rounded-md bg-pink-50 px-2 py-0.5 text-xs font-bold text-pink-700">
                   t = {curTVal.toFixed(3)}s
                 </span>
+                {is3D && (
+                  <span className="mono rounded-md bg-amber-50 px-2 py-0.5 text-xs font-bold text-amber-700">
+                    z_slice = {(zGrid[Math.min(zSliceIndex, zGrid.length - 1)] ?? 0).toFixed(2)}
+                  </span>
+                )}
                 {l2t !== null && (
                   <span className="mono rounded-md bg-violet-50 px-2 py-0.5 text-xs font-bold text-violet-700">
                     L₂(t) = {sci(l2t)}
@@ -1001,23 +1056,94 @@ export function BenchmarkView({ activeProblem, agentResult, activeRunId }: Props
               </div>
             }
           >
-            <PlotlyChart data={figAnimated.data} layout={figAnimated.layout} height={320} />
-            <div className="mt-3 flex items-center gap-3 px-2">
-              <span className="mono text-xs font-bold text-slate-500">t = {tDomain.min_val.toFixed(2)}</span>
-              <input
-                type="range"
-                min={0}
-                max={maxIdx}
-                value={curIdx}
-                onChange={(e) => {
-                  setIsPlaying(false)
-                  setTimeIndex(parseInt(e.target.value))
-                }}
-                className="h-2 flex-1 cursor-pointer accent-[#7C3AED]"
-              />
-              <span className="mono text-xs font-bold text-slate-600">
-                t = {tDomain.max_val.toFixed(2)}
-              </span>
+            {has2dSpatial && active2dGrid ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-xs font-bold text-slate-600 mb-1">Spatial Heatmap u(x, y, t={curTVal.toFixed(2)})</div>
+                  <PlotlyChart
+                    data={[{
+                      type: 'heatmap',
+                      x: xGrid,
+                      y: yGrid,
+                      z: active2dGrid,
+                      colorscale: SOL_SCALE,
+                      zsmooth: 'best',
+                    }]}
+                    layout={{
+                      height: 300,
+                      margin: { l: 40, r: 10, t: 10, b: 35 },
+                      xaxis: { title: 'x' },
+                      yaxis: { title: 'y' },
+                      paper_bgcolor: 'rgba(0,0,0,0)',
+                    }}
+                    height={300}
+                  />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-slate-600 mb-1">3D Spatial Wave Elevation u(x, y)</div>
+                  <PlotlyChart
+                    data={[{
+                      type: 'surface',
+                      x: xGrid,
+                      y: yGrid,
+                      z: active2dGrid,
+                      colorscale: SOL_SCALE,
+                      showscale: false,
+                    }]}
+                    layout={{
+                      height: 300,
+                      margin: { l: 0, r: 0, t: 0, b: 0 },
+                      paper_bgcolor: 'rgba(0,0,0,0)',
+                      scene: {
+                        xaxis: { title: 'x' },
+                        yaxis: { title: 'y' },
+                        zaxis: { title: 'u' },
+                        camera: { eye: { x: 1.4, y: -1.4, z: 0.8 } },
+                      },
+                    }}
+                    height={300}
+                  />
+                </div>
+              </div>
+            ) : (
+              <PlotlyChart data={figAnimated.data} layout={figAnimated.layout} height={320} />
+            )}
+
+            <div className="mt-3 flex flex-col gap-2">
+              <div className="flex items-center gap-3 px-2">
+                <span className="mono text-xs font-bold text-slate-500">t = {tDomain.min_val.toFixed(2)}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={maxIdx}
+                  value={curIdx}
+                  onChange={(e) => {
+                    setIsPlaying(false)
+                    setTimeIndex(parseInt(e.target.value))
+                  }}
+                  className="h-2 flex-1 cursor-pointer accent-[#7C3AED]"
+                />
+                <span className="mono text-xs font-bold text-slate-600">
+                  t = {tDomain.max_val.toFixed(2)}
+                </span>
+              </div>
+
+              {is3D && (
+                <div className="flex items-center gap-3 px-2 border-t border-violet-100 pt-2">
+                  <span className="mono text-xs font-bold text-amber-600">z = {zDomain.min_val.toFixed(2)}</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, zGrid.length - 1)}
+                    value={zSliceIndex}
+                    onChange={(e) => setZSliceIndex(parseInt(e.target.value))}
+                    className="h-2 flex-1 cursor-pointer accent-[#D97706]"
+                  />
+                  <span className="mono text-xs font-bold text-amber-700">
+                    z = {zDomain.max_val.toFixed(2)}
+                  </span>
+                </div>
+              )}
             </div>
           </Card>
         )

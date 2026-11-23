@@ -22,6 +22,8 @@ export interface Domain1DIR {
 export interface DomainSpecIR {
   t: Domain1DIR
   x?: Domain1DIR | null
+  y?: Domain1DIR | null
+  z?: Domain1DIR | null
 }
 
 export interface DerivativeSpecIR {
@@ -43,6 +45,7 @@ export interface ProblemIR {
   id: string
   name: string
   problem_type: 'ODE' | 'PDE'
+  spatial_dim?: 0 | 1 | 2 | 3
   equation_latex: string
   derivatives: DerivativeSpecIR
   domain: DomainSpecIR
@@ -67,11 +70,14 @@ export interface ParseEquationResponse {
   equation_latex: string
   typst_math: string
   problem_type: 'ODE' | 'PDE'
+  spatial_dim?: number
   spatial_order: number
   time_order: number
   is_nonlinear: boolean
   regimes: string[]
   primary_regime: string
+  suggested_invariant?: 'mass' | 'l2_energy' | 'none'
+  stability_advisory?: string | null
   detected_parameters: ParameterDetected[]
   cfl_checks: {
     type: string
@@ -98,9 +104,13 @@ export interface NumericalSolutionResponse {
   success: boolean
   method: string
   problem_id: string
+  spatial_dim?: number
   x: number[]
+  y?: number[] | null
+  z?: number[] | null
   t: number[]
   u: number[][] // 2D grid: (Nt, Nx)
+  u_2d_slices?: { t: number; grid: number[][] }[]
   slices: TimeSlice[]
   drift_pct: number
   rel_l2_error?: number | null
@@ -390,7 +400,11 @@ export function getReportBundleUrl(runId: string): string {
 }
 
 export function getReportScriptUrl(runId: string): string {
-  return `${API_BASE}/reports/${runId}/script`
+  return `${API_BASE}/experiments/${runId}/export-code`
+}
+
+export function getExportCodeUrl(runId: string): string {
+  return `${API_BASE}/experiments/${runId}/export-code`
 }
 
 
@@ -580,6 +594,12 @@ export interface RecompileReportParams {
   journal?: string
   custom_notes?: string
   typst_override?: string
+  abstract?: string
+  introduction?: string
+  mathematical_formulation?: string
+  methodology?: string
+  results_and_discussion?: string
+  conclusion?: string
 }
 
 export interface RecompileReportResponse {

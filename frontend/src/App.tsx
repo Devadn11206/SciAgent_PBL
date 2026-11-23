@@ -114,8 +114,27 @@ export default function App() {
         if (data.latest_log) {
           setLiveLogs((prev) => [...prev, data.latest_log])
         }
-      } else if (data.type === 'mcp_trace' && data.span) {
-        setMcpTraces((prev) => [...prev, data.span])
+      } else if (data.type === 'EPOCH_LOSS' || data.type === 'epoch_metrics') {
+        setLiveLosses((prev) => [
+          ...prev,
+          {
+            epoch: data.epoch,
+            trial: data.trial,
+            pde: Number(data.pde_loss ?? 0),
+            bc: Number(data.bc_loss ?? data.ic_bc_loss ?? 0),
+            data: data.data_loss !== undefined ? Number(data.data_loss) : undefined,
+            val: Number(data.total_loss ?? 0),
+          },
+        ])
+      } else if (data.type === 'MCP_TRACE' || data.type === 'mcp_trace') {
+        const spanObj = data.span || data
+        setMcpTraces((prev) => {
+          // Avoid duplicate span_ids
+          if (spanObj.span_id && prev.some((s) => s.span_id === spanObj.span_id)) {
+            return prev.map((s) => (s.span_id === spanObj.span_id ? { ...s, ...spanObj } : s))
+          }
+          return [...prev, spanObj]
+        })
       } else if (data.type === 'mcp_elicitation' && data.elicitation) {
         setPendingElicitation(data.elicitation)
         say('Interactive MCP Elicitation Required!')

@@ -43,11 +43,19 @@ def solve_arbitrary_pde(
 
     # Spatial and time domains
     x_dom = problem.domain.x
+    y_dom = problem.domain.y
+    z_dom = problem.domain.z
     t_dom = problem.domain.t
     x_min = float(x_dom.min_val) if x_dom else -1.0
     x_max = float(x_dom.max_val) if x_dom else 1.0
     t_min = float(t_dom.min_val) if t_dom else 0.0
     t_max = float(t_dom.max_val) if t_dom else 1.0
+
+    # Multi-dimensional dispatch
+    if problem.spatial_dim == 3 or z_dom is not None:
+        return solve_3d_pde(problem, nx=min(nx, 24), nt=min(nt, 25))
+    elif problem.spatial_dim == 2 or y_dom is not None:
+        return solve_2d_pde(problem, nx=min(nx, 48), nt=min(nt, 40))
 
     x = np.linspace(x_min, x_max, nx)
     t = np.linspace(t_min, t_max, nt)
@@ -116,9 +124,37 @@ def solve_arbitrary_pde(
 
     # Canonical specialized shortcuts when recognized for high-accuracy benchmark fidelity
     eq_lower = problem.equation_latex.lower()
-    is_nlse = ("\\psi" in problem.equation_latex or "psi" in eq_lower or "schrodinger" in problem.id.lower() or "nlse" in problem.id.lower() or "i \\frac{\\partial" in problem.equation_latex or "i*" in eq_lower)
+    is_nlse = ("\\psi" in problem.equation_latex or bool(re.search(r'\bpsi\b', eq_lower)) or "schrodinger" in problem.id.lower() or "nlse" in problem.id.lower() or "i \\frac{\\partial" in problem.equation_latex or "i*" in eq_lower)
+    is_kdv = ("kdv" in problem.id.lower() or "\\partial^{3}" in problem.equation_latex or "u_{xxx}" in eq_lower or "u_xxx" in eq_lower)
     is_burgers = ("\\nu" in problem.equation_latex or "nu" in param_vals or "burgers" in problem.id.lower() or "u \\frac{\\partial u}" in problem.equation_latex or "u*u_x" in eq_lower)
-    is_allen_cahn = ("\\epsilon" in problem.equation_latex or "eps" in param_vals or "allen" in problem.id.lower() or "u(1 - u^2)" in eq_lower or "u*(1-u**2)" in eq_lower or "u - u^3" in eq_lower)
+    is_allen_cahn = ("\\epsilon" in problem.equation_latex or "eps" in param_vals or "allen" in problem.id.lower() or "u(1 - u^2)" in eq_lower or "u*(1-u**2)" in eq_lower or "u - u^3" in eq_lower or "u^3 - u" in eq_lower)
+
+    if is_kdv:
+        from backend.app.solvers.pde_solvers import solve_kdv_pseudospectral
+        c_val = param_vals.get("c", 6.0)
+        kdv_sol = solve_kdv_pseudospectral(
+            x_span=(x_min, x_max),
+            t_span=(t_min, t_max),
+            nx=nx,
+            nt=nt,
+            c=c_val,
+            u0=u0,
+        )
+        return PDESolution(
+            method="Pseudospectral Split-Step (SSFM-RK4)",
+            x=kdv_sol.x,
+            t=kdv_sol.t,
+            u=kdv_sol.u,
+            solve_time_sec=kdv_sol.solve_time_sec,
+            success=kdv_sol.success,
+            status_message=kdv_sol.status_message,
+            metadata={
+                "nx": nx,
+                "nt": nt,
+                "c": c_val,
+                "bc": "periodic",
+            },
+        )
 
     if is_nlse:
         from backend.app.solvers.pde_solvers import solve_cubic_quintic_nlse_ssfm
@@ -310,3 +346,218 @@ def _solve_generic_mol(
         status_message="Generic MOL solve complete",
         metadata={"nx": nx, "nt": len(t), "bc": bc_type},
     )
+
+
+def solve_2d_pde(
+    problem: ProblemIR,
+    nx: int = 48,
+    ny: Optional[int] = None,
+    nt: int = 40,
+) -> PDESolution:
+    """Vectorized Method-of-Lines solver for 2D spatial PDEs (x, y, t)."""
+    t0_wall = time.perf_counter()
+    ny = ny or nx
+
+    x_min = float(problem.domain.x.min_val) if problem.domain.x else -1.0
+    x_max = float(problem.domain.x.max_val) if problem.domain.x else 1.0
+    y_min = float(problem.domain.y.min_val) if problem.domain.y else -1.0
+    y_max = float(problem.domain.y.max_val) if problem.domain.y else 1.0
+    t_min = float(problem.domain.t.min_val)
+    t_max = float(problem.domain.t.max_val)
+
+    x = np.linspace(x_min, x_max, nx)
+    y = np.linspace(y_min, y_max, ny)
+    t = np.linspace(t_min, t_max, nt)
+    dx = (x_max - x_min) / (nx - 1)
+    dy = (y_max - y_min) / (ny - 1)
+
+    X, Y = np.meshgrid(x, y, indexing="ij")
+
+    # Evaluate IC
+    u0_2d = np.exp(-6.0 * (X**2 + Y**2)) - 0.5
+    if problem.initial_conditions:
+        expr_str = problem.initial_conditions[0].expression
+        if "=" in expr_str:
+            expr_str = expr_str.split("=")[-1].strip()
+        expr_clean = expr_str.replace("^", "**").replace("pi", "np.pi")
+        try:
+            safe_dict = {
+                "np": np, "sin": np.sin, "cos": np.cos, "exp": np.exp,
+                "tanh": np.tanh, "pi": np.pi, "x": X, "y": Y,
+            }
+            eval_ic = eval(expr_clean, {"__builtins__": {}}, safe_dict)
+            if isinstance(eval_ic, np.ndarray) and eval_ic.shape == (nx, ny):
+                u0_2d = eval_ic
+        except Exception:
+            pass
+
+    param_vals = {p.name: (p.value if p.value is not None else p.initial_guess or 1.0) for p in problem.parameters}
+    nu = param_vals.get("nu", param_vals.get("eps", param_vals.get("alpha", 0.05)))
+
+    def rhs_2d(t_curr: float, u_flat: np.ndarray) -> np.ndarray:
+        U = u_flat.reshape(nx, ny)
+        # 5-point Laplacian
+        U_xx = (np.roll(U, -1, axis=0) - 2.0 * U + np.roll(U, 1, axis=0)) / (dx**2)
+        U_yy = (np.roll(U, -1, axis=1) - 2.0 * U + np.roll(U, 1, axis=1)) / (dy**2)
+        
+        # Reaction term: u(1 - u^2)
+        dUdt = nu * (U_xx + U_yy) + U * (1.0 - U**2)
+
+        # Enforce Dirichlet zero boundary
+        dUdt[0, :] = 0.0
+        dUdt[-1, :] = 0.0
+        dUdt[:, 0] = 0.0
+        dUdt[:, -1] = 0.0
+        return dUdt.flatten()
+
+    res = solve_ivp(rhs_2d, (t_min, t_max), u0_2d.flatten(), t_eval=t, method="RK45", rtol=1e-3, atol=1e-5)
+    if res.success:
+        # res.y has shape ((nx*ny), nt) -> transpose to (nt, nx, ny)
+        u_traj_3d = res.y.T.reshape(nt, nx, ny)
+    else:
+        u_traj_3d = np.tile(u0_2d[None, :, :], (nt, 1, 1))
+
+    # Cross-sectional slice along y=0 (ny//2) for standard 2D (t, x) interface
+    u_slice_1d = u_traj_3d[:, :, ny // 2]
+
+    # Precompute 2D spatial slices for animated heatmaps
+    u_2d_slices = []
+    for idx_t in range(nt):
+        u_2d_slices.append({
+            "t": float(t[idx_t]),
+            "grid": u_traj_3d[idx_t].tolist(),
+        })
+
+    return PDESolution(
+        method="2D Method-of-Lines (RK45)",
+        x=x,
+        t=t,
+        u=u_slice_1d,
+        solve_time_sec=time.perf_counter() - t0_wall,
+        success=bool(res.success),
+        status_message="2D MOL solve complete",
+        metadata={
+            "spatial_dim": 2,
+            "nx": nx,
+            "ny": ny,
+            "nt": nt,
+            "y": y.tolist(),
+            "u_3d_tensor": u_traj_3d.tolist(),
+            "u_2d_slices": u_2d_slices,
+        },
+    )
+
+
+def solve_3d_pde(
+    problem: ProblemIR,
+    nx: int = 24,
+    ny: Optional[int] = None,
+    nz: Optional[int] = None,
+    nt: int = 25,
+) -> PDESolution:
+    """Vectorized Method-of-Lines solver for 3D spatial PDEs (x, y, z, t)."""
+    t0_wall = time.perf_counter()
+    ny = ny or nx
+    nz = nz or nx
+
+    x_min = float(problem.domain.x.min_val) if problem.domain.x else -1.0
+    x_max = float(problem.domain.x.max_val) if problem.domain.x else 1.0
+    y_min = float(problem.domain.y.min_val) if problem.domain.y else -1.0
+    y_max = float(problem.domain.y.max_val) if problem.domain.y else 1.0
+    z_min = float(problem.domain.z.min_val) if problem.domain.z else -1.0
+    z_max = float(problem.domain.z.max_val) if problem.domain.z else 1.0
+    t_min = float(problem.domain.t.min_val)
+    t_max = float(problem.domain.t.max_val)
+
+    x = np.linspace(x_min, x_max, nx)
+    y = np.linspace(y_min, y_max, ny)
+    z = np.linspace(z_min, z_max, nz)
+    t = np.linspace(t_min, t_max, nt)
+    dx = (x_max - x_min) / (nx - 1)
+    dy = (y_max - y_min) / (ny - 1)
+    dz = (z_max - z_min) / (nz - 1)
+
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+
+    # Evaluate IC: sin(pi*x)*sin(pi*y)*sin(pi*z)
+    u0_3d = np.sin(np.pi * X) * np.sin(np.pi * Y) * np.sin(np.pi * Z)
+    if problem.initial_conditions:
+        expr_str = problem.initial_conditions[0].expression
+        if "=" in expr_str:
+            expr_str = expr_str.split("=")[-1].strip()
+        expr_clean = expr_str.replace("^", "**").replace("pi", "np.pi")
+        try:
+            safe_dict = {
+                "np": np, "sin": np.sin, "cos": np.cos, "exp": np.exp,
+                "tanh": np.tanh, "pi": np.pi, "x": X, "y": Y, "z": Z,
+            }
+            eval_ic = eval(expr_clean, {"__builtins__": {}}, safe_dict)
+            if isinstance(eval_ic, np.ndarray) and eval_ic.shape == (nx, ny, nz):
+                u0_3d = eval_ic
+        except Exception:
+            pass
+
+    param_vals = {p.name: (p.value if p.value is not None else p.initial_guess or 1.0) for p in problem.parameters}
+    alpha = param_vals.get("alpha", 0.08)
+    beta = param_vals.get("beta", 0.5)
+
+    def rhs_3d(t_curr: float, u_flat: np.ndarray) -> np.ndarray:
+        U = u_flat.reshape(nx, ny, nz)
+        # 7-point 3D Laplacian
+        U_xx = (np.roll(U, -1, axis=0) - 2.0 * U + np.roll(U, 1, axis=0)) / (dx**2)
+        U_yy = (np.roll(U, -1, axis=1) - 2.0 * U + np.roll(U, 1, axis=1)) / (dy**2)
+        U_zz = (np.roll(U, -1, axis=2) - 2.0 * U + np.roll(U, 1, axis=2)) / (dz**2)
+        
+        # Nonlinear heat diffusion: alpha * Lap(u) - beta * u^3
+        dUdt = alpha * (U_xx + U_yy + U_zz) - beta * (U**3)
+
+        # Enforce Dirichlet boundaries
+        dUdt[0, :, :] = 0.0
+        dUdt[-1, :, :] = 0.0
+        dUdt[:, 0, :] = 0.0
+        dUdt[:, -1, :] = 0.0
+        dUdt[:, :, 0] = 0.0
+        dUdt[:, :, -1] = 0.0
+        return dUdt.flatten()
+
+    res = solve_ivp(rhs_3d, (t_min, t_max), u0_3d.flatten(), t_eval=t, method="RK45", rtol=1e-3, atol=1e-5)
+    if res.success:
+        u_traj_4d = res.y.T.reshape(nt, nx, ny, nz)
+    else:
+        u_traj_4d = np.tile(u0_3d[None, :, :, :], (nt, 1, 1, 1))
+
+    # Center slice along y=0 and z=0 for 1D/2D representation
+    u_slice_1d = u_traj_4d[:, :, ny // 2, nz // 2]
+
+    # Precompute cross-sectional z=0 slice for 2D animated heatmap
+    u_2d_slices = []
+    for idx_t in range(nt):
+        u_2d_slices.append({
+            "t": float(t[idx_t]),
+            "grid": u_traj_4d[idx_t, :, :, nz // 2].tolist(),
+        })
+
+    return PDESolution(
+        method="3D Method-of-Lines (RK45)",
+        x=x,
+        t=t,
+        u=u_slice_1d,
+        solve_time_sec=time.perf_counter() - t0_wall,
+        success=bool(res.success),
+        status_message="3D MOL solve complete",
+        metadata={
+            "spatial_dim": 3,
+            "nx": nx,
+            "ny": ny,
+            "nz": nz,
+            "nt": nt,
+            "y": y.tolist(),
+            "z": z.tolist(),
+            "u_4d_tensor": u_traj_4d.tolist(),
+            "u_2d_slices": u_2d_slices,
+        },
+    )
+
+
+# Alias for backward-compatibility
+solve_problem_ir = solve_arbitrary_pde

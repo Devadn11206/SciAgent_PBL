@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -78,6 +79,25 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Catch-all exception handler to ensure JSON error response and CORS headers are returned."""
+    import traceback
+    traceback.print_exc()
+    from fastapi.responses import JSONResponse
+    origin = request.headers.get("origin", "*")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": origin if origin != "null" else "*",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Request & Response Schemas
 # ---------------------------------------------------------------------------
@@ -101,11 +121,14 @@ class ParseEquationResponse(BaseModel):
     equation_latex: str
     typst_math: str
     problem_type: Literal["ODE", "PDE"]
+    spatial_dim: int = 1
     spatial_order: int
     time_order: int
     is_nonlinear: bool
     regimes: List[str]
     primary_regime: str
+    suggested_invariant: Literal["mass", "l2_energy", "none"] = "none"
+    stability_advisory: Optional[str] = None
     detected_parameters: List[ParameterDetected]
     cfl_checks: List[Dict[str, Any]]
     scaling_factors: Dict[str, float]
@@ -116,6 +139,8 @@ class SolveProblemRequest(BaseModel):
     problem: ProblemIR
     method_override: Optional[str] = Field(None, description="Solver method (RK4, DOP853, Radau, Crank-Nicolson, Split-Step FFT)")
     nx: Optional[int] = Field(128, description="Spatial grid points")
+    ny: Optional[int] = Field(None, description="Spatial grid points in y (2D/3D)")
+    nz: Optional[int] = Field(None, description="Spatial grid points in z (3D)")
     nt: Optional[int] = Field(250, description="Time steps")
 
 
@@ -123,9 +148,13 @@ class SolveProblemResponse(BaseModel):
     success: bool
     method: str
     problem_id: str
+    spatial_dim: int = 1
     x: List[float]
+    y: Optional[List[float]] = None
+    z: Optional[List[float]] = None
     t: List[float]
-    u: List[List[float]]             # 2D field grid (Nt, Nx)
+    u: List[Any]                     # 2D (Nt, Nx) or flat / multi-D slices
+    u_2d_slices: Optional[List[Dict[str, Any]]] = None # (t, slice) for 2D/3D visualizations
     slices: List[Dict[str, Any]]     # Time slice profiles
     drift_pct: float
     rel_l2_error: Optional[float] = None
@@ -190,9 +219,9 @@ def root():
 
 @app.get("/api/presets", response_model=List[ProblemIR])
 def get_presets():
-    """Return all 4 canonical nonlinear problem presets."""
+    """Return all 7 canonical nonlinear problem presets (including 2D Gray-Scott and 3D Heat)."""
     presets = []
-    for exp_id in ["burgers", "allen-cahn", "nlse", "duffing"]:
+    for exp_id in ["burgers", "allen-cahn", "nlse", "duffing", "kdv", "gray-scott-2d", "heat-3d"]:
         presets.append(get_canonical_ir(exp_id))
     return presets
 
@@ -215,9 +244,17 @@ def parse_equation(req: ParseEquationRequest):
         "eps": ("ε", "Interface-width parameter", 0.05, 0.08, (0.01, 0.2)),
         "gamma": ("γ", "Nonlinear coefficient", 1.0, 0.6, (0.1, 3.0)),
         "delta": ("δ", "Damping / quintic coefficient", 0.15, 0.05, (0.0, 0.5)),
-        "alpha": ("α", "Linear stiffness", -1.0, -0.5, (-2.0, 2.0)),
+        "alpha": ("α", "Linear stiffness / advection", -1.0, -0.5, (-2.0, 2.0)),
         "beta": ("β", "Cubic stiffness / dispersion", 1.5, 1.0, (0.5, 3.0)),
         "omega": ("ω", "Driving frequency", 1.2, 1.0, (0.5, 2.0)),
+        "mu": ("μ", "Dispersion / mobility parameter", 1.0, 1.0, (0.1, 5.0)),
+        "sigma": ("σ", "Diffusion / coupling constant", 1.0, 1.0, (0.01, 10.0)),
+        "rho": ("ρ", "Reaction / density parameter", 1.0, 1.0, (0.01, 5.0)),
+        "c": ("c", "Wave speed / convection velocity", 1.0, 1.0, (0.1, 5.0)),
+        "k": ("k", "Wavenumber / reaction rate", 1.0, 1.0, (0.1, 10.0)),
+        "D": ("D", "Diffusion coefficient", 0.1, 0.1, (0.001, 2.0)),
+        "r": ("r", "Growth rate", 1.0, 1.0, (0.1, 5.0)),
+        "K": ("K", "Carrying capacity", 1.0, 1.0, (0.1, 10.0)),
     }
 
     for p_name in ctx["parameters"]:
@@ -239,11 +276,11 @@ def parse_equation(req: ParseEquationRequest):
                 ParameterDetected(
                     name=p_name,
                     symbol=p_name,
-                    description=f"Parameter {p_name}",
+                    description=f"Free parameter {p_name}",
                     suggested_mode="fixed",
                     value=1.0,
                     initial_guess=1.0,
-                    bounds=(0.0, 10.0),
+                    bounds=(0.01, 5.0),
                 )
             )
 
@@ -252,8 +289,15 @@ def parse_equation(req: ParseEquationRequest):
     if req.experiment_id and req.experiment_id in CANONICAL_FACTORIES:
         matched_preset = get_canonical_ir(req.experiment_id)
     else:
-        # Default fallback domain based on problem type
-        matched_preset = get_canonical_ir("burgers" if cls_res.problem_type == "PDE" else "duffing")
+        # Check if 2D or 3D PDE is detected based on variables present in equation
+        has_z = "z" in ctx["independent_vars"] or "z" in req.equation
+        has_y = "y" in ctx["independent_vars"] or "y" in req.equation
+        if has_z and cls_res.problem_type == "PDE":
+            matched_preset = get_canonical_ir("heat-3d")
+        elif has_y and cls_res.problem_type == "PDE":
+            matched_preset = get_canonical_ir("gray-scott-2d")
+        else:
+            matched_preset = get_canonical_ir("burgers" if cls_res.problem_type == "PDE" else "duffing")
 
     normalizer = matched_preset.get_normalizer()
     scaling_factors = normalizer.get_scaling_factors()
@@ -273,15 +317,20 @@ def parse_equation(req: ParseEquationRequest):
 
     typst = to_typst_math(req.equation)
 
+    spatial_dim = 0 if cls_res.problem_type == "ODE" else (3 if "z" in ctx["independent_vars"] or "z" in req.equation else (2 if "y" in ctx["independent_vars"] or "y" in req.equation else 1))
+
     return ParseEquationResponse(
         equation_latex=req.equation,
         typst_math=typst,
         problem_type=cls_res.problem_type,
+        spatial_dim=spatial_dim,
         spatial_order=cls_res.spatial_order,
         time_order=cls_res.time_order,
         is_nonlinear=cls_res.is_nonlinear,
         regimes=cls_res.regimes,
         primary_regime=cls_res.primary_regime,
+        suggested_invariant=cls_res.suggested_invariant,
+        stability_advisory=cls_res.stability_advisory,
         detected_parameters=detected_params,
         cfl_checks=cfl_list,
         scaling_factors=scaling_factors,
@@ -415,13 +464,23 @@ def solve_problem(req: SolveProblemRequest):
     rel_l2 = 2.31e-3 if prob.id == "burgers" else (3.84e-3 if prob.id == "allen-cahn" else (1.76e-3 if prob.id == "nlse" else 5.62e-3))
     linf = 1.87e-2 if prob.id == "burgers" else (3.07e-2 if prob.id == "allen-cahn" else (1.54e-2 if prob.id == "nlse" else 4.1e-2))
 
+    meta = getattr(sol, "metadata", {}) or {}
+    y_vals = meta.get("y")
+    z_vals = meta.get("z")
+    u_2d_slices = meta.get("u_2d_slices")
+    spatial_dim = meta.get("spatial_dim", prob.spatial_dim)
+
     return SolveProblemResponse(
         success=True,
         method=sol.method,
         problem_id=prob.id,
+        spatial_dim=spatial_dim,
         x=x_vals,
+        y=y_vals,
+        z=z_vals,
         t=t_vals,
         u=u_field,
+        u_2d_slices=u_2d_slices,
         slices=slices,
         drift_pct=drift_pct,
         rel_l2_error=rel_l2,
@@ -530,9 +589,28 @@ async def train_pinn(req: TrainPINNRequest):
     with torch.no_grad():
         if not is_ode:
             x_norm = np.array([norm.x_transform.to_normalized(x) for x in x_vals], dtype=np.float32)
-            # Create meshgrid of normalized coordinates
-            T_grid, X_grid = np.meshgrid(t_norm, x_norm, indexing="ij")
-            coords_flat = np.stack([T_grid.flatten(), X_grid.flatten()], axis=-1)
+            if prob.spatial_dim == 3 and norm.y_transform and norm.z_transform:
+                y_zero_norm = norm.y_transform.to_normalized(0.0)
+                z_zero_norm = norm.z_transform.to_normalized(0.0)
+                T_grid, X_grid = np.meshgrid(t_norm, x_norm, indexing="ij")
+                coords_flat = np.stack([
+                    T_grid.flatten(),
+                    X_grid.flatten(),
+                    np.full_like(T_grid.flatten(), y_zero_norm),
+                    np.full_like(T_grid.flatten(), z_zero_norm),
+                ], axis=-1)
+            elif prob.spatial_dim == 2 and norm.y_transform:
+                y_zero_norm = norm.y_transform.to_normalized(0.0)
+                T_grid, X_grid = np.meshgrid(t_norm, x_norm, indexing="ij")
+                coords_flat = np.stack([
+                    T_grid.flatten(),
+                    X_grid.flatten(),
+                    np.full_like(T_grid.flatten(), y_zero_norm),
+                ], axis=-1)
+            else:
+                T_grid, X_grid = np.meshgrid(t_norm, x_norm, indexing="ij")
+                coords_flat = np.stack([T_grid.flatten(), X_grid.flatten()], axis=-1)
+
             coords_tensor = torch.tensor(coords_flat, dtype=torch.float32, device=trainer.device)
 
             out_pred = model(coords_tensor).cpu().numpy()
@@ -696,7 +774,28 @@ def get_experiment_detail(run_id: str):
     run = get_experiment_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Experiment '{run_id}' not found")
+    
+    # Enrich run with loss_history and mcp_traces at top level for convenience
+    raw = run.get("raw_payload") or {}
+    if "loss_history" in raw:
+        run["loss_history"] = raw["loss_history"]
+    run["mcp_traces"] = [s.model_dump() for s in get_run_spans(run_id)]
     return run
+
+
+@app.get("/api/experiments/{run_id}/export-code")
+def export_standalone_code(run_id: str):
+    """Synthesize clean, self-contained, reproducible PyTorch script for experiment run."""
+    from backend.app.reports.code_exporter import generate_standalone_pytorch_script
+    run = get_experiment_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Experiment '{run_id}' not found")
+    code_str = generate_standalone_pytorch_script(run)
+    return PlainTextResponse(
+        code_str,
+        media_type="text/x-python",
+        headers={"Content-Disposition": f"attachment; filename=sciagent_{run_id}.py"},
+    )
 
 
 @app.websocket("/ws/agents/{run_id}")
@@ -725,7 +824,7 @@ async def run_autonomous_agents(req: AgentRunRequest):
     def sync_epoch_callback(r_id: str, trial_idx: int, metric: Dict[str, Any]):
         if r_id == run_id and run_id in active_websockets:
             payload = {
-                "type": "epoch_metrics",
+                "type": "EPOCH_LOSS",
                 "run_id": run_id,
                 "trial": trial_idx,
                 "epoch": metric.get("epoch", 0),
@@ -733,6 +832,7 @@ async def run_autonomous_agents(req: AgentRunRequest):
                 "pde_loss": metric.get("pde_loss", 0.0),
                 "bc_loss": metric.get("bc_loss", 0.0),
                 "ic_loss": metric.get("ic_loss", 0.0),
+                "ic_bc_loss": metric.get("bc_loss", 0.0) + metric.get("ic_loss", 0.0),
                 "data_loss": metric.get("data_loss", 0.0),
             }
             for ws in list(active_websockets[run_id]):
@@ -806,20 +906,19 @@ async def run_autonomous_agents(req: AgentRunRequest):
 
         # Broadcast any recent W3C MCP Trace Spans for this run
         recent_spans = get_run_spans(run_id)
-        if recent_spans:
-            latest_span = recent_spans[-1]
+        for s in recent_spans:
             await send_ws_event({
-                "type": "mcp_trace",
+                "type": "MCP_TRACE",
                 "run_id": run_id,
-                "span_id": latest_span.span_id,
-                "parent_span_id": latest_span.parent_span_id,
-                "tool_name": latest_span.tool_name,
-                "artifact_uri": latest_span.artifact_uri,
-                "status": latest_span.status,
-                "duration_ms": latest_span.duration_ms,
-                "progress_pct": latest_span.progress_pct,
-                "details": latest_span.details,
-                "timestamp": latest_span.timestamp,
+                "span_id": s.span_id,
+                "parent_span_id": s.parent_span_id,
+                "tool_name": s.tool_name,
+                "artifact_uri": s.artifact_uri,
+                "status": s.status,
+                "duration_ms": s.duration_ms,
+                "progress_pct": s.progress_pct,
+                "details": s.details,
+                "timestamp": s.timestamp,
             })
 
         # Check for any pending MCP elicitation requirement for this run
@@ -836,6 +935,13 @@ async def run_autonomous_agents(req: AgentRunRequest):
     # Load recorded SQLite run
     saved_run = get_experiment_run(run_id)
 
+    # Attach all loss history and mcp traces to saved_run for GET /api/experiments/{run_id}
+    combined_loss_history = []
+    for tr in final_state.get("trial_results", []):
+        combined_loss_history.extend(tr.get("loss_history", []))
+
+    spans_dicts = [s.model_dump() for s in get_run_spans(run_id)]
+
     return {
         "success": True,
         "run_id": run_id,
@@ -846,6 +952,8 @@ async def run_autonomous_agents(req: AgentRunRequest):
         "ablation_history": final_state.get("ablation_history", []),
         "critic_verdict": final_state.get("critic_verdict"),
         "research_summary": final_state.get("research_summary"),
+        "loss_history": combined_loss_history,
+        "mcp_traces": spans_dicts,
         "logs": final_state.get("logs", []),
         "db_record": saved_run,
     }
@@ -961,6 +1069,12 @@ class RecompileReportRequest(BaseModel):
     journal: Optional[str] = None
     custom_notes: Optional[str] = None
     typst_override: Optional[str] = None
+    abstract: Optional[str] = None
+    introduction: Optional[str] = None
+    mathematical_formulation: Optional[str] = None
+    methodology: Optional[str] = None
+    results_and_discussion: Optional[str] = None
+    conclusion: Optional[str] = None
 
 
 @app.post("/api/reports/{run_id}/recompile")
@@ -976,6 +1090,12 @@ async def recompile_report_endpoint(run_id: str, req: RecompileReportRequest):
         "affiliation": req.affiliation,
         "journal": req.journal,
         "custom_notes": req.custom_notes,
+        "abstract": req.abstract,
+        "introduction": req.introduction,
+        "mathematical_formulation": req.mathematical_formulation,
+        "methodology": req.methodology,
+        "results_and_discussion": req.results_and_discussion,
+        "conclusion": req.conclusion,
     }
 
     if req.typst_override and req.typst_override.strip():

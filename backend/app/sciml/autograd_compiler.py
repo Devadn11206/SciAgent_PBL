@@ -56,24 +56,27 @@ class AutogradResidualCompiler:
         self.dxx_scale = self.scaling.get("dxx", 1.0)
         self.dxxx_scale = self.scaling.get("dxxx", 1.0)
         self.dxxxx_scale = self.scaling.get("dxxxx", 1.0)
+        self.dy_scale = self.scaling.get("dy", 1.0)
+        self.dyy_scale = self.scaling.get("dyy", 1.0)
+        self.dz_scale = self.scaling.get("dz", 1.0)
+        self.dzz_scale = self.scaling.get("dzz", 1.0)
 
     def build_residual_fn(
         self,
         model: nn.Module,
         inverse_params: Dict[str, nn.Parameter],
-    ) -> Callable[[torch.Tensor, Optional[torch.Tensor]], torch.Tensor]:
-        """Build callable residual function R(t, x) or R(t).
-
-        Inputs:
-            t: tensor of shape (N, 1) with requires_grad=True (normalized [-1, 1])
-            x: tensor of shape (N, 1) with requires_grad=True (normalized [-1, 1]) or None for ODEs
-        Returns:
-            residual: tensor of shape (N, 1)
-        """
+    ) -> Callable[..., torch.Tensor]:
+        """Build callable residual function R(t, x, [y, z]) or R(t)."""
         prob_id = self.problem.id.lower()
         eq_latex = self.problem.equation_latex.lower()
 
-        if "burgers" in prob_id or "nu" in eq_latex or "u \\frac{\\partial u}" in self.problem.equation_latex:
+        if self.problem.spatial_dim == 3 or "heat-3d" in prob_id or "\\partial^{2} u}{\\partial z^{2}}" in self.problem.equation_latex or "u_zz" in eq_latex:
+            return self._build_3d_heat_residual(model, inverse_params)
+        elif self.problem.spatial_dim == 2 or "gray-scott" in prob_id or "\\partial^{2} u}{\\partial y^{2}}" in self.problem.equation_latex or "u_yy" in eq_latex:
+            return self._build_2d_gray_scott_residual(model, inverse_params)
+        elif "kdv" in prob_id or "\\partial^{3}" in self.problem.equation_latex or "u_{xxx}" in eq_latex or "u_xxx" in eq_latex:
+            return self._build_kdv_residual(model, inverse_params)
+        elif "burgers" in prob_id or "nu" in eq_latex or "u \\frac{\\partial u}" in self.problem.equation_latex:
             return self._build_burgers_residual(model, inverse_params)
         elif "allen" in prob_id or "cahn" in prob_id or "eps" in eq_latex or "1 - u^2" in eq_latex or "1 - u**2" in eq_latex:
             return self._build_allen_cahn_residual(model, inverse_params)
@@ -84,6 +87,100 @@ class AutogradResidualCompiler:
         else:
             # Fallback to general nonlinear Burgers/advection-diffusion residual
             return self._build_burgers_residual(model, inverse_params)
+
+    def _build_2d_gray_scott_residual(
+        self,
+        model: nn.Module,
+        inverse_params: Dict[str, nn.Parameter],
+    ):
+        """2D Reaction-Diffusion: u_t - nu * (u_xx + u_yy) - u * (1 - u^2) = 0."""
+        nu_param = inverse_params.get("nu")
+        fixed_nu = self.problem.get_parameter("nu")
+        nu_default = fixed_nu.value if (fixed_nu and fixed_nu.value) else 0.05
+
+        dt_s = self.dt_scale
+        dxx_s = self.dxx_scale
+        dyy_s = self.dyy_scale
+
+        def residual_fn(t: torch.Tensor, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
+            if y is None:
+                # If coords were passed combined in x
+                if x.shape[-1] >= 2:
+                    coords = torch.cat([t, x], dim=-1)
+                    y = x[:, 1:2]
+                    x_col = x[:, 0:1]
+                else:
+                    y = torch.zeros_like(x, requires_grad=True)
+                    coords = torch.cat([t, x, y], dim=-1)
+                    x_col = x
+            else:
+                coords = torch.cat([t, x, y], dim=-1)
+                x_col = x
+
+            u = model(coords)
+            u_t = compute_derivative(u, t, order=1) * dt_s
+            u_xx = compute_derivative(u, x_col, order=2) * dxx_s
+            u_yy = compute_derivative(u, y, order=2) * dyy_s
+
+            nu = nu_param if nu_param is not None else nu_default
+            residual = u_t - nu * (u_xx + u_yy) - u * (1.0 - u**2)
+            return residual
+
+        return residual_fn
+
+    def _build_3d_heat_residual(
+        self,
+        model: nn.Module,
+        inverse_params: Dict[str, nn.Parameter],
+    ):
+        """3D Nonlinear Diffusion: u_t - alpha * (u_xx + u_yy + u_zz) + beta * u^3 = 0."""
+        alpha_param = inverse_params.get("alpha")
+        fixed_alpha = self.problem.get_parameter("alpha")
+        alpha_val = fixed_alpha.value if (fixed_alpha and fixed_alpha.value) else 0.08
+
+        beta_param = inverse_params.get("beta")
+        fixed_beta = self.problem.get_parameter("beta")
+        beta_val = fixed_beta.value if (fixed_beta and fixed_beta.value) else 0.5
+
+        dt_s = self.dt_scale
+        dxx_s = self.dxx_scale
+        dyy_s = self.dyy_scale
+        dzz_s = self.dzz_scale
+
+        def residual_fn(
+            t: torch.Tensor,
+            x: torch.Tensor,
+            y: Optional[torch.Tensor] = None,
+            z: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            if y is None or z is None:
+                if x.shape[-1] >= 3:
+                    coords = torch.cat([t, x], dim=-1)
+                    x_col = x[:, 0:1]
+                    y = x[:, 1:2]
+                    z = x[:, 2:3]
+                else:
+                    x_col = x[:, 0:1] if x.shape[-1] > 1 else x
+                    y = torch.zeros_like(x_col, requires_grad=True)
+                    z = torch.zeros_like(x_col, requires_grad=True)
+                    coords = torch.cat([t, x_col, y, z], dim=-1)
+            else:
+                x_col = x
+                coords = torch.cat([t, x, y, z], dim=-1)
+
+            u = model(coords)
+            u_t = compute_derivative(u, t, order=1) * dt_s
+            u_xx = compute_derivative(u, x_col, order=2) * dxx_s
+            u_yy = compute_derivative(u, y, order=2) * dyy_s
+            u_zz = compute_derivative(u, z, order=2) * dzz_s
+
+            a_val = alpha_param if alpha_param is not None else alpha_val
+            b_val = beta_param if beta_param is not None else beta_val
+
+            residual = u_t - a_val * (u_xx + u_yy + u_zz) + b_val * (u**3)
+            return residual
+
+        return residual_fn
 
     def _build_burgers_residual(
         self,
@@ -233,6 +330,34 @@ class AutogradResidualCompiler:
             forcing = gamma_val * torch.cos(omega_val * t_phys)
 
             residual = x_tt + delta_val * x_t + alpha_val * x_state + beta * (x_state ** 3) - forcing
+            return residual
+
+        return residual_fn
+
+    def _build_kdv_residual(
+        self,
+        model: nn.Module,
+        inverse_params: Dict[str, nn.Parameter],
+    ):
+        """Korteweg-de Vries (KdV): u_t + c * u * u_x + u_xxx = 0 (3rd order dispersive PDE)."""
+        c_param = inverse_params.get("c")
+        fixed_c = self.problem.get_parameter("c")
+        c_default = fixed_c.value if (fixed_c and fixed_c.value) else 6.0
+
+        dt_s = self.dt_scale
+        dx_s = self.dx_scale
+        dxxx_s = self.dxxx_scale
+
+        def residual_fn(t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+            coords = torch.cat([t, x], dim=-1)
+            u = model(coords)  # (N, 1)
+
+            u_t = compute_derivative(u, t, order=1) * dt_s
+            u_x = compute_derivative(u, x, order=1) * dx_s
+            u_xxx = compute_derivative(u, x, order=3) * dxxx_s
+
+            c_val = c_param if c_param is not None else c_default
+            residual = u_t + c_val * u * u_x + u_xxx
             return residual
 
         return residual_fn
